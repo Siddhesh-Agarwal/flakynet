@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import random
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, TypeAlias
 
@@ -96,6 +96,9 @@ class Plan:
         if not all(isinstance(fault, FAULT_TYPES) for fault in faults):
             raise TypeError("Plan() expected Fault instances")
         object.__setattr__(self, "faults", tuple(faults))
+
+    def __iter__(self) -> Iterator[Fault]:
+        return iter(self.faults)
 
     @classmethod
     def of(cls, value: Plan | Fault | Iterable[Fault]) -> Plan:

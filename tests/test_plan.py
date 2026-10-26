@@ -2,7 +2,8 @@ import random
 
 import pytest
 
-from flakynet.plan import ALL, between, every, nth, saw
+from flakynet.faults import Reset
+from flakynet.plan import ALL, Plan, between, every, nth, saw
 
 
 def test_between_is_inclusive_and_uniform():
@@ -42,3 +43,9 @@ def test_saw_requires_explicit_stream_side():
         saw(b"", side="client")
     with pytest.raises(ValueError):
         saw(b"x", side="both")  # type: ignore[arg-type]
+
+
+def test_plan_is_iterable_in_order():
+    first = Reset(after_bytes=1)
+    second = Reset(after_bytes=2)
+    assert list(Plan(first, second)) == [first, second]
