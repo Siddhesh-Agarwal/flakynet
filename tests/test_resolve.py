@@ -1,3 +1,5 @@
+from typing import Any, cast
+
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
@@ -44,6 +46,11 @@ def test_different_connection_indexes_have_different_keys():
 def test_negative_connection_index_rejected():
     with pytest.raises(ValueError):
         resolve(Plan(), 0, "p0", -1)
+
+
+def test_non_integer_connection_index_rejected():
+    with pytest.raises(TypeError):
+        resolve(Plan(), 0, "p0", cast(Any, 0.5))
 
 
 def test_conn_selector_skips_other_connections():

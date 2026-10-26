@@ -29,6 +29,32 @@ def test_latency_rejects_negative_values():
         Latency(ms=1, jitter_ms=-1)
 
 
+def test_latency_rejects_non_integer_values():
+    with pytest.raises(TypeError):
+        Latency(ms=cast(Any, 0.5))
+    with pytest.raises(TypeError):
+        Latency(ms=cast(Any, float("nan")))
+    with pytest.raises(TypeError):
+        Latency(ms=1, jitter_ms=cast(Any, 0.5))
+
+
+def test_numeric_fault_fields_require_integers():
+    with pytest.raises(TypeError):
+        Bandwidth(bytes_per_second=cast(Any, 0.5))
+    with pytest.raises(TypeError):
+        Fragment(max_bytes=cast(Any, 3.0))
+    with pytest.raises(TypeError):
+        Fragment(max_bytes=True)
+    with pytest.raises(TypeError):
+        Fragment(max_bytes=3, window=cast(Any, (0.5, 5)))
+    with pytest.raises(TypeError):
+        Fragment(max_bytes=3, window=cast(Any, (0, 5.0)))
+    with pytest.raises(TypeError):
+        Reset(after_bytes=cast(Any, 0.5))
+    with pytest.raises(ValueError):
+        Reset(after_bytes=-1)
+
+
 def test_window_rejects_reversed_or_negative_bounds():
     with pytest.raises(ValueError):
         Fragment(max_bytes=3, window=(10, 5))
@@ -77,6 +103,8 @@ def test_plan_normalizes_single_fault_and_iterable():
 def test_plan_rejects_non_fault_inputs():
     with pytest.raises(TypeError):
         Plan.of(cast(Any, "not a fault"))
+    with pytest.raises(TypeError):
+        Plan.of(cast(Any, b"not a fault"))
     with pytest.raises(TypeError):
         Plan.of(cast(Any, [object()]))
 

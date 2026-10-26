@@ -50,3 +50,28 @@ def test_plan_is_iterable_in_order():
     first = Reset(after_bytes=1)
     second = Reset(after_bytes=2)
     assert list(Plan(first, second)) == [first, second]
+
+
+def test_between_rejects_non_integer_bounds():
+    with pytest.raises(TypeError):
+        between(cast(Any, 0.5), cast(Any, 2.5))
+    with pytest.raises(TypeError):
+        between(True, 2)
+
+
+def test_nth_rejects_non_integer_index():
+    with pytest.raises(TypeError):
+        nth(cast(Any, 0.5))
+    with pytest.raises(TypeError):
+        nth(True)
+
+
+def test_connection_selectors_reject_invalid_connection_indexes():
+    with pytest.raises(ValueError):
+        every().matches(-1)
+    with pytest.raises(TypeError):
+        every().matches(cast(Any, 0.5))
+    with pytest.raises(ValueError):
+        nth(0).matches(-1)
+    with pytest.raises(TypeError):
+        nth(0).matches(cast(Any, 0.5))

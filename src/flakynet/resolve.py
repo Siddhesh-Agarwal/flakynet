@@ -15,22 +15,37 @@ from .faults import (
 from .plan import Between, Plan, Saw, Side, StreamSide
 
 
+def _validate_conn_index(conn_index: object) -> int:
+    if isinstance(conn_index, bool) or not isinstance(conn_index, int):
+        raise TypeError("conn_index must be an int")
+    if conn_index < 0:
+        raise ValueError("conn_index must be non-negative")
+    return conn_index
+
+
 def rng_key(seed: int | str, proxy_name: str, conn_index: int) -> str:
+    """Return the stable per-connection RNG key ``seed:proxy_name:conn_index``."""
     return f"{seed}:{proxy_name}:{conn_index}"
 
 
 @dataclass(frozen=True, slots=True)
 class LatencyParams:
+    """Resolved latency parameters; ``jitter_key`` seeds per-segment delays."""
+
     jitter_key: int
 
 
 @dataclass(frozen=True, slots=True)
 class BandwidthParams:
+    """Resolved bandwidth rate in bytes per second."""
+
     bytes_per_second: int
 
 
 @dataclass(frozen=True, slots=True)
 class FragmentParams:
+    """Resolved fragment size cap in bytes."""
+
     max_bytes: int
 
 
@@ -39,6 +54,8 @@ ResolvedParams: TypeAlias = LatencyParams | BandwidthParams | FragmentParams | N
 
 @dataclass(frozen=True, slots=True)
 class StaticFault:
+    """A fault anchored to absolute stream offsets at accept time."""
+
     fault_index: int
     fault: Fault
     stream: StreamSide | None
@@ -49,6 +66,8 @@ class StaticFault:
 
 @dataclass(frozen=True, slots=True)
 class ArmedFault:
+    """A fault whose start awaits a ``saw`` match at runtime."""
+
     fault_index: int
     fault: Fault
     stream: StreamSide
@@ -61,6 +80,11 @@ class ArmedFault:
 
 @dataclass(frozen=True, slots=True)
 class ConnectionPlan:
+    """Phase-1 resolution output for one connection.
+
+    ``faults`` preserves plan order and is expanded per affected stream.
+    """
+
     seed: int | str
     proxy_name: str
     conn_index: int
@@ -101,8 +125,13 @@ def resolve(
     proxy_name: str,
     conn_index: int,
 ) -> ConnectionPlan:
-    if conn_index < 0:
-        raise ValueError("conn_index must be non-negative")
+    """Resolve ``plan`` for one connection.
+
+    This is pure and socket-free: every random draw happens here, keyed by
+    ``(seed, proxy_name, conn_index)``. Faults are emitted in plan order and
+    expanded per affected stream. ``conn_index`` is zero-based.
+    """
+    conn_index = _validate_conn_index(conn_index)
 
     key = rng_key(seed, proxy_name, conn_index)
     rng = random.Random(key)
