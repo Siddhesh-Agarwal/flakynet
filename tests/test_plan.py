@@ -1,4 +1,5 @@
 import random
+from typing import Any, cast
 
 import pytest
 
@@ -38,11 +39,11 @@ def test_every_matches_every_connection():
 
 def test_saw_requires_explicit_stream_side():
     with pytest.raises(TypeError):
-        saw(b"x")  # type: ignore[call-arg]
+        cast(Any, saw)(b"x")
     with pytest.raises(ValueError):
         saw(b"", side="client")
     with pytest.raises(ValueError):
-        saw(b"x", side="both")  # type: ignore[arg-type]
+        saw(b"x", side=cast(Any, "both"))
 
 
 def test_plan_is_iterable_in_order():

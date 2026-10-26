@@ -113,9 +113,7 @@ def test_fault_index_refers_to_original_plan():
     lo=st.integers(min_value=0, max_value=1000),
     hi=st.integers(min_value=0, max_value=1000),
 )
-def test_resolution_is_reproducible_for_arbitrary_inputs(
-    seed, proxy_name, conn_index, lo, hi
-):
+def test_resolution_is_reproducible_for_arbitrary_inputs(seed, proxy_name, conn_index, lo, hi):
     lo, hi = min(lo, hi), max(lo, hi)
     plan = Plan(Reset(after_bytes=between(lo, hi)))
     assert resolve(plan, seed, proxy_name, conn_index) == resolve(

@@ -150,8 +150,6 @@ class RefuseConnect:
         _validate_conn(self.conn)
 
 
-Fault: TypeAlias = (
-    Latency | Bandwidth | Fragment | Reset | CloseAfter | Blackhole | RefuseConnect
-)
+Fault: TypeAlias = Latency | Bandwidth | Fragment | Reset | CloseAfter | Blackhole | RefuseConnect
 
 FAULT_TYPES = (Latency, Bandwidth, Fragment, Reset, CloseAfter, Blackhole, RefuseConnect)

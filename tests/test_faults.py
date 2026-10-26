@@ -1,3 +1,5 @@
+from typing import Any, cast
+
 import pytest
 
 from flakynet.faults import (
@@ -61,7 +63,7 @@ def test_discrete_fault_accepts_byte_or_saw_trigger():
 
 def test_invalid_side_is_rejected():
     with pytest.raises(ValueError):
-        Latency(ms=1, side="both_ways")  # type: ignore[arg-type]
+        Latency(ms=1, side=cast(Any, "both_ways"))
 
 
 def test_plan_normalizes_single_fault_and_iterable():
@@ -74,9 +76,9 @@ def test_plan_normalizes_single_fault_and_iterable():
 
 def test_plan_rejects_non_fault_inputs():
     with pytest.raises(TypeError):
-        Plan.of("not a fault")
+        Plan.of(cast(Any, "not a fault"))
     with pytest.raises(TypeError):
-        Plan.of([object()])
+        Plan.of(cast(Any, [object()]))
 
 
 def test_plan_preserves_connection_scope():

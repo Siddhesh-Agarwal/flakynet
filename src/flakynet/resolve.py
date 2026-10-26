@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
-from typing import TypeAlias, cast
+from typing import TypeAlias
 
 from .faults import (
     Bandwidth,
@@ -71,7 +71,7 @@ class ConnectionPlan:
 def _sides(side: Side) -> tuple[StreamSide, ...]:
     if side == "both":
         return ("client", "server")
-    return (cast(StreamSide, side),)
+    return (side,)
 
 
 def _draw_offset(value: int | Between, rng: random.Random) -> int:
@@ -149,8 +149,6 @@ def resolve(
                 end = start
                 params = None
 
-            resolved.append(
-                StaticFault(fault_index, fault, side, start, end, params)
-            )
+            resolved.append(StaticFault(fault_index, fault, side, start, end, params))
 
     return ConnectionPlan(seed, proxy_name, conn_index, key, tuple(resolved))
