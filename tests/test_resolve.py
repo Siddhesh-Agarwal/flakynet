@@ -2,9 +2,18 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from flakynet.faults import Bandwidth, Fragment, Latency, RefuseConnect, Reset
-from flakynet.plan import Plan, between, nth
+from flakynet.faults import (
+    Bandwidth,
+    Blackhole,
+    CloseAfter,
+    Fragment,
+    Latency,
+    RefuseConnect,
+    Reset,
+)
+from flakynet.plan import Plan, between, nth, saw
 from flakynet.resolve import (
+    ArmedFault,
     BandwidthParams,
     FragmentParams,
     LatencyParams,
@@ -112,3 +121,44 @@ def test_resolution_is_reproducible_for_arbitrary_inputs(
     assert resolve(plan, seed, proxy_name, conn_index) == resolve(
         plan, seed, proxy_name, conn_index
     )
+
+
+def test_armed_same_stream_fault_has_no_start_until_match():
+    plan = Plan(Blackhole(after=saw(b"X", side="server"), side="server"))
+    result = resolve(plan, 0, "p0", 0)
+    fault = result.faults[0]
+    assert isinstance(fault, ArmedFault)
+    assert fault.stream == "server"
+    assert fault.trigger.side == "server"
+    assert fault.start is None
+    assert fault.delta == 0
+
+
+def test_armed_cross_stream_fault_is_recorded_on_target_stream():
+    plan = Plan(Blackhole(after=saw(b"COMMIT", side="client"), side="server"))
+    result = resolve(plan, 0, "p0", 0)
+    fault = result.faults[0]
+    assert isinstance(fault, ArmedFault)
+    assert fault.stream == "server"
+    assert fault.trigger.side == "client"
+
+
+def test_armed_delta_can_be_drawn():
+    plan = Plan(CloseAfter(after=saw(b"X", side="server", delta=between(1, 5))))
+    result = resolve(plan, 0, "p0", 0)
+    assert isinstance(result.faults[0], ArmedFault)
+    assert 1 <= result.faults[0].delta <= 5
+
+
+def test_armed_side_both_expands_to_two_streams():
+    plan = Plan(Blackhole(after=saw(b"X", side="server")))
+    result = resolve(plan, 0, "p0", 0)
+    assert {f.stream for f in result.faults} == {"client", "server"}
+    assert all(isinstance(f, ArmedFault) for f in result.faults)
+
+
+def test_armed_resolution_is_deterministic():
+    plan = Plan(Blackhole(after=saw(b"X", side="client", delta=between(1, 5))))
+    a = resolve(plan, 7, "p0", 0)
+    b = resolve(plan, 7, "p0", 0)
+    assert a == b

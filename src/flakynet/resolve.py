@@ -12,7 +12,7 @@ from .faults import (
     RefuseConnect,
     Window,
 )
-from .plan import Between, Plan, Side, StreamSide
+from .plan import Between, Plan, Saw, Side, StreamSide
 
 
 def rng_key(seed: int | str, proxy_name: str, conn_index: int) -> str:
@@ -48,12 +48,24 @@ class StaticFault:
 
 
 @dataclass(frozen=True, slots=True)
+class ArmedFault:
+    fault_index: int
+    fault: Fault
+    stream: StreamSide
+    trigger: Saw
+    delta: int
+    start: int | None = None
+    end: int | None = None
+    params: ResolvedParams = None
+
+
+@dataclass(frozen=True, slots=True)
 class ConnectionPlan:
     seed: int | str
     proxy_name: str
     conn_index: int
     rng_key: str
-    faults: tuple[StaticFault, ...]
+    faults: tuple[StaticFault | ArmedFault, ...]
 
 
 def _sides(side: Side) -> tuple[StreamSide, ...]:
@@ -94,7 +106,7 @@ def resolve(
 
     key = rng_key(seed, proxy_name, conn_index)
     rng = random.Random(key)
-    resolved: list[StaticFault] = []
+    resolved: list[StaticFault | ArmedFault] = []
 
     for fault_index, fault in enumerate(plan):
         if not fault.conn.matches(conn_index):
@@ -121,7 +133,17 @@ def resolve(
                 params = FragmentParams(fault.max_bytes)
             else:
                 if fault.after is not None:
-                    raise NotImplementedError("armed faults arrive in the next task")
+                    delta = _draw_offset(fault.after.delta, rng)
+                    resolved.append(
+                        ArmedFault(
+                            fault_index=fault_index,
+                            fault=fault,
+                            stream=side,
+                            trigger=fault.after,
+                            delta=delta,
+                        )
+                    )
+                    continue
                 assert fault.after_bytes is not None
                 start = _draw_offset(fault.after_bytes, rng)
                 end = start
