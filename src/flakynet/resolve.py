@@ -30,9 +30,43 @@ def rng_key(seed: int | str, proxy_name: str, conn_index: int) -> str:
 
 @dataclass(frozen=True, slots=True)
 class LatencyParams:
-    """Resolved latency parameters; ``jitter_key`` seeds per-segment delays."""
+    """Resolved latency parameters.
+
+    ``jitter_key`` seeds the per-segment delay sequence. ``ms`` and
+    ``jitter_ms`` are copied from the fault so the delay is a pure function of
+    these parameters, the stream, and the segment ordinal.
+    """
 
     jitter_key: int
+    ms: int
+    jitter_ms: int
+
+
+def latency_delay_ms(
+    params: LatencyParams,
+    stream: StreamSide,
+    ordinal: int,
+) -> int:
+    """Return the planned delay for segment ``ordinal`` of ``stream``.
+
+    The delay is ``ms + randint(0, jitter_ms)`` at
+    ``random.Random(f"{jitter_key}:{stream}:{ordinal}")``. ``ordinal`` is
+    zero-based and counts every forwarded segment of that stream, including
+    segments outside a latency window. It is a pure function of the resolved
+    key, stream, and ordinal; no shared RNG state is consumed at runtime.
+
+    Which application bytes share a segment depends on how the OS chunked the
+    reads, so the delay values replay but their placement on the byte stream
+    does not.
+    """
+    if isinstance(ordinal, bool) or not isinstance(ordinal, int):
+        raise TypeError("ordinal must be an int")
+    if ordinal < 0:
+        raise ValueError("ordinal must be non-negative")
+    if stream not in ("client", "server"):
+        raise ValueError("stream must be 'client' or 'server'")
+    rng = random.Random(f"{params.jitter_key}:{stream}:{ordinal}")
+    return params.ms + rng.randint(0, params.jitter_ms)
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,7 +187,11 @@ def resolve(
             if isinstance(fault, Latency):
                 assert jitter_key is not None
                 start, end = _resolve_window(fault.window, rng)
-                params: ResolvedParams = LatencyParams(jitter_key)
+                params: ResolvedParams = LatencyParams(
+                    jitter_key=jitter_key,
+                    ms=fault.ms,
+                    jitter_ms=fault.jitter_ms,
+                )
             elif isinstance(fault, Bandwidth):
                 start, end = _resolve_window(fault.window, rng)
                 params = BandwidthParams(_draw_positive(fault.bytes_per_second, rng))

@@ -1,3 +1,4 @@
+import random
 from typing import Any, cast
 
 import pytest
@@ -19,6 +20,7 @@ from flakynet.resolve import (
     BandwidthParams,
     FragmentParams,
     LatencyParams,
+    latency_delay_ms,
     resolve,
     rng_key,
 )
@@ -115,6 +117,102 @@ def test_bandwidth_rate_is_drawn_at_resolution():
     fault = result.faults[0]
     assert isinstance(fault.params, BandwidthParams)
     assert 100 <= fault.params.bytes_per_second <= 200
+
+
+def test_latency_params_keep_planned_range_and_key():
+    plan = Plan(Latency(ms=10, jitter_ms=5, side="server"))
+    fault = resolve(plan, 0, "p0", 0).faults[0]
+    assert isinstance(fault.params, LatencyParams)
+    assert (fault.params.ms, fault.params.jitter_ms) == (10, 5)
+    assert fault.params.jitter_key >= 0
+
+
+def test_latency_delay_matches_planned_function_exactly():
+    params = LatencyParams(jitter_key=123456789, ms=10, jitter_ms=5)
+    assert [latency_delay_ms(params, "server", n) for n in range(8)] == [
+        15,
+        13,
+        10,
+        13,
+        12,
+        14,
+        13,
+        14,
+    ]
+    assert [latency_delay_ms(params, "client", n) for n in range(8)] == [
+        10,
+        12,
+        10,
+        14,
+        11,
+        11,
+        11,
+        10,
+    ]
+
+
+def test_latency_delay_is_independent_of_runtime_rng_state():
+    params = LatencyParams(jitter_key=42, ms=7, jitter_ms=3)
+    first = [latency_delay_ms(params, "client", n) for n in range(5)]
+    random.seed(999)
+    random.random()
+    second = [latency_delay_ms(params, "client", n) for n in range(5)]
+    assert first == second
+
+
+def test_latency_delay_with_zero_jitter_is_exactly_ms():
+    params = LatencyParams(jitter_key=7, ms=25, jitter_ms=0)
+    assert {latency_delay_ms(params, "server", n) for n in range(10)} == {25}
+
+
+def test_latency_delay_rejects_invalid_ordinal():
+    params = LatencyParams(jitter_key=7, ms=25, jitter_ms=0)
+    with pytest.raises(ValueError):
+        latency_delay_ms(params, "server", -1)
+    with pytest.raises(TypeError):
+        latency_delay_ms(params, "server", cast(Any, 1.0))
+
+
+def test_bandwidth_fixed_rate_is_exact_for_each_stream():
+    plan = Plan(Bandwidth(bytes_per_second=1234))
+    result = resolve(plan, 0, "p0", 0)
+    assert len(result.faults) == 2
+    for fault in result.faults:
+        assert fault.params == BandwidthParams(bytes_per_second=1234)
+
+
+def test_bandwidth_draw_is_reproducible_and_matches_planned_value():
+    plan = Plan(Bandwidth(bytes_per_second=between(100, 200), side="server"))
+    first = resolve(plan, 7, "p0", 0)
+    second = resolve(plan, 7, "p0", 0)
+    assert first == second
+    params = first.faults[0].params
+    assert isinstance(params, BandwidthParams)
+    assert params.bytes_per_second == random.Random("7:p0:0").randint(100, 200)
+
+
+def test_fragment_size_and_window_are_exact():
+    plan = Plan(Fragment(max_bytes=7, side="server", window=(3, 9)))
+    fault = resolve(plan, 0, "p0", 0).faults[0]
+    assert (fault.start, fault.end) == (3, 9)
+    assert fault.params == FragmentParams(max_bytes=7)
+
+
+def test_blackhole_offset_resolves_exactly_and_reproducibly():
+    plan = Plan(Blackhole(after_bytes=between(5, 9), side="client"))
+    first = resolve(plan, 7, "p0", 0)
+    second = resolve(plan, 7, "p0", 0)
+    assert first == second
+    fault = first.faults[0]
+    assert fault.start == fault.end == random.Random("7:p0:0").randint(5, 9)
+    assert fault.params is None
+
+
+def test_window_faults_expand_per_stream_with_static_params():
+    plan = Plan(Latency(ms=5, side="both", window=(1, 2)))
+    result = resolve(plan, 0, "p0", 0)
+    assert {fault.stream for fault in result.faults} == {"client", "server"}
+    assert all(isinstance(fault.params, LatencyParams) for fault in result.faults)
 
 
 def test_refuse_connect_is_connection_level():

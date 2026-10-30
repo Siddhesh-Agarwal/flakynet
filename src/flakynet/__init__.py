@@ -1,5 +1,6 @@
 """Seeded, reproducible network faults for testing real clients over real sockets."""
 
+from .events import CanonicalEvent, Event
 from .faults import (
     Bandwidth,
     Blackhole,
@@ -12,17 +13,35 @@ from .faults import (
 from .matcher import Matcher
 from .plan import ALL, Plan, between, every, nth, saw
 from .proxy import Proxy
+from .report import (
+    ENDED_EARLY,
+    FIRED,
+    MISSED,
+    PENDING,
+    PREEMPTED,
+    UNMATCHED,
+    FaultStatus,
+)
 from .resolve import ArmedFault, ConnectionPlan, StaticFault, resolve
 
 __version__ = "0.1.0"
 
 __all__ = [
     "ALL",
+    "ENDED_EARLY",
+    "FIRED",
+    "MISSED",
+    "PENDING",
+    "PREEMPTED",
+    "UNMATCHED",
     "ArmedFault",
     "Bandwidth",
     "Blackhole",
+    "CanonicalEvent",
     "CloseAfter",
     "ConnectionPlan",
+    "Event",
+    "FaultStatus",
     "Fragment",
     "Latency",
     "Matcher",

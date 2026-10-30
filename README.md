@@ -77,16 +77,33 @@ pytest --flakynet-sweep=200     # try seeds 0..199 and report the failing seed +
 | Fault           | Kind     | What it does at the socket level                              |
 | --------------- | -------- | ------------------------------------------------------------- |
 | `Latency`       | window   | Delays each forwarded segment by a planned amount plus jitter |
-| `Bandwidth`     | window   | Caps throughput in bytes per second                           |
+| `Bandwidth`     | window   | Paces segments at a planned bytes-per-second rate             |
 | `Fragment`      | window   | Forwards data in pieces of at most N bytes                    |
 | `CloseAfter`    | discrete | Graceful close (FIN) after N bytes                            |
 | `Reset`         | discrete | Abortive close (RST) after N bytes                            |
-| `Blackhole`     | discrete | Stops forwarding while keeping the connection open            |
-| `RefuseConnect` | discrete | Rejects or immediately closes new connections                 |
+| `Blackhole`     | discrete | Drains and discards after the trigger, leaving the connection open |
+| `RefuseConnect` | discrete | Accepts then immediately resets selected new connections      |
 
 There is deliberately no "packet loss" fault. TCP hides packet loss from
 applications; what a client actually sees is stalls, resets, truncation and
 fragmentation, which is what flakynet models.
+
+**`Latency` applies per forwarded segment.** A segment is each piece the pump
+writes after splitting at fault boundaries, so every `Fragment` piece is its
+own segment. The delay for segment `n` is planned exactly and replays, but
+**which bytes receive which delay is not replayable**: the OS decides how reads
+are chunked, and the chunking decides where segments end. `Latency` logs only
+`window_entered` and `window_exited` events, never per-segment events, so its
+`canonical_events()` stay stable. Measured elapsed time is not promised.
+
+**`Bandwidth` draws its rate once per connection and stream** at accept time.
+The rate is part of the resolved plan; actual measured throughput is not
+promised.
+
+**`Blackhole` drains and discards** the affected stream after the trigger
+rather than pausing reads. The sender's writes keep succeeding, the connection
+stays open, and the peer sees only the bytes before the trigger. It does not
+model TCP backpressure on the sender.
 
 ## How determinism works (and what it does not promise)
 
@@ -114,19 +131,24 @@ reproducible for request/response protocols, where the other side cannot send
 before it has been asked.
 
 **Replaying and comparing.** `proxy.events` is in arrival order and is not
-stable between runs. `proxy.canonical_events()` is sorted by
-`(connection, stream, offset, fault)` without timestamps or arrival order;
-compare that.
+stable between runs. Each event records the connection, stream, offset,
+whether the offset is exact, fault index, fault name, kind, resolved planned
+parameters, sequence number, and monotonic timestamp. `proxy.canonical_events()`
+sorts by `(connection, stream, offset, fault_index, kind)` and removes the
+sequence number and timestamp; a non-exact offset becomes `None`. Compare
+`canonical_events()`, never arrival order. Window faults log
+`window_entered` and `window_exited`; discrete faults log `fired`. `Latency`
+logs only the two window events, never one per segment.
 
 **What the seed pins:** which faults apply to which connection, their offsets
 and windows, and their planned parameters (rate, extra bytes after a match,
 and the delay assigned to the n-th forwarded segment).
 
 **What it does not pin:** OS scheduling or measured elapsed time; how the OS
-chunks reads, and therefore which bytes share a `Latency` segment (the delay
-values are replayable by segment number, their placement on bytes is not); the bytes
-your application sends (offsets that depend on content are reproducible only
-if the content is identical); and connection numbering, which follows accept
+chunks reads, and therefore which bytes get which `Latency` delay (the delay
+values replay by segment number, but their placement on bytes does not); the
+bytes your application sends (offsets that depend on content are reproducible
+only if the content is identical); and connection numbering, which follows accept
 order, so it is stable only if your client opens connections in a
 deterministic order.
 
@@ -146,6 +168,10 @@ p.assert_all_fired(allow={"unmatched"})
 | `MISSED`      | The exchange ended normally and the trigger was never reached (offset beyond the stream, or pattern absent) |
 | `PENDING`     | The connection was still open when the report was taken                                                     |
 | `UNMATCHED`   | No accepted connection matched the fault's selector                                                         |
+
+Each report entry also records how the connection ended (`graceful`,
+`client_abort`, `server_abort`, `error`, or `flakynet`) and the bytes forwarded
+in each direction.
 
 By default `assert_all_fired()` accepts `PREEMPTED` and `ENDED_EARLY` and fails
 on `MISSED`, `PENDING` and `UNMATCHED`, because a fault that silently never

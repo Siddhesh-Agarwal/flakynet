@@ -75,12 +75,21 @@ def _validate_discrete(
 
 @dataclass(frozen=True, slots=True)
 class Latency:
-    """Delay each forwarded segment inside a window.
+    """Delay each forwarded segment whose offset is inside a window.
 
-    The n-th segment delay is a pure function of the resolved jitter key,
-    stream, and segment ordinal. Delay values are reproducible, but which
-    application bytes share a segment depends on OS read chunking, so their
-    placement on the byte stream is not replayable.
+    The window ``[start, end)`` is the trigger; the delay is pacing applied
+    inside it. A forwarded segment is each piece the pump writes after
+    splitting at fault boundaries, so every piece produced by ``Fragment`` is
+    its own segment. The delay for the zero-based segment ordinal ``n`` of a
+    stream is ``ms + randint(0, jitter_ms)`` at
+    ``random.Random(f"{jitter_key}:{stream}:{n}")``, a pure function of the
+    resolved key, stream, and ordinal. Segment ordinals count every forwarded
+    segment of that stream, including segments outside the window.
+
+    The delay values replay, but **which bytes receive which delay does not**:
+    segment boundaries come from how the OS chunked reads. ``Latency`` logs
+    only ``window_entered`` and ``window_exited`` events, never per-segment
+    events, and it makes no promise about measured elapsed time.
     """
 
     ms: int
@@ -103,8 +112,10 @@ class Latency:
 class Bandwidth:
     """Cap throughput in bytes per second inside a window.
 
-    The rate is drawn once per connection and stream at accept time; measured
-    throughput is not promised.
+    The window ``[start, end)`` is the trigger; a delay of
+    ``segment_bytes / rate`` seconds is applied before each segment written
+    inside it. The rate is drawn once per connection and stream at accept time
+    and is part of the resolved plan. Measured throughput is not promised.
     """
 
     bytes_per_second: int | Between
@@ -130,7 +141,8 @@ class Fragment:
     """Forward data in pieces of at most ``max_bytes`` inside a window.
 
     Pieces are separate writes, not guaranteed separate reads; TCP may
-    coalesce them before the client observes them.
+    coalesce them before the client observes them. Each piece is its own
+    forwarded segment, so each piece receives its own ``Latency`` delay.
     """
 
     max_bytes: int
@@ -175,7 +187,13 @@ class CloseAfter:
 
 @dataclass(frozen=True, slots=True)
 class Blackhole:
-    """Stop forwarding the affected stream while keeping the connection open."""
+    """Drop the affected stream while keeping the connection open.
+
+    The proxy drains and discards bytes at and after the trigger, so the
+    sender is not blocked by TCP backpressure and the peer sees nothing after
+    the prefix. This models bytes vanishing in the network, not a stalled
+    receiver; use ``Bandwidth`` or ``Latency`` for pacing.
+    """
 
     after_bytes: int | Between | None = None
     after: Saw | None = None

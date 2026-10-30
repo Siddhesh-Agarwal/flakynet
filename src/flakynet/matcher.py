@@ -2,7 +2,13 @@ from __future__ import annotations
 
 
 class Matcher:
-    """Find the first occurrence of a byte pattern across chunk boundaries."""
+    """Find the first occurrence of a byte pattern across chunk boundaries.
+
+    A match is reported by its exclusive end offset. Only the last
+    ``len(pattern) - 1`` bytes are retained between chunks, which is enough to
+    detect any match spanning a boundary. Each matcher reports its first match
+    and then stays matched.
+    """
 
     def __init__(self, pattern: bytes) -> None:
         if not isinstance(pattern, bytes) or not pattern:

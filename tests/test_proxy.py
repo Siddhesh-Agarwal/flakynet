@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import queue
 import socket
 import struct
 import sys
@@ -12,12 +13,18 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from flakynet import (
+    Bandwidth,
+    Blackhole,
+    CanonicalEvent,
     CloseAfter,
+    Fragment,
     Latency,
     Plan,
     Proxy,
+    RefuseConnect,
     Reset,
     between,
+    nth,
     resolve,
     saw,
 )
@@ -208,6 +215,133 @@ def abrupt_then_echo_server() -> Iterator[tuple[str, int]]:
     finally:
         listener.close()
         thread.join(timeout=2.0)
+
+
+@contextlib.contextmanager
+def collecting_server() -> Iterator[tuple[tuple[str, int], queue.Queue[bytes], threading.Event]]:
+    listener = socket.create_server(("127.0.0.1", 0))
+    chunks: queue.Queue[bytes] = queue.Queue()
+    done = threading.Event()
+
+    def run() -> None:
+        try:
+            conn, _ = listener.accept()
+            with conn:
+                while True:
+                    try:
+                        data = conn.recv(65536)
+                    except OSError:
+                        break
+                    if not data:
+                        break
+                    chunks.put(data)
+        except OSError:
+            pass
+        finally:
+            listener.close()
+            done.set()
+
+    thread = threading.Thread(target=run, daemon=True, name="collecting-server")
+    thread.start()
+    host, port = listener.getsockname()[:2]
+    try:
+        yield (str(host), int(port)), chunks, done
+    finally:
+        listener.close()
+        thread.join(timeout=2.0)
+
+
+@contextlib.contextmanager
+def sending_server(payload: bytes) -> Iterator[tuple[str, int]]:
+    listener = socket.create_server(("127.0.0.1", 0))
+
+    def run() -> None:
+        try:
+            conn, _ = listener.accept()
+            with conn:
+                conn.sendall(payload)
+                while conn.recv(65536):
+                    pass
+        except OSError:
+            pass
+        finally:
+            listener.close()
+
+    thread = threading.Thread(target=run, daemon=True, name="sending-server")
+    thread.start()
+    host, port = listener.getsockname()[:2]
+    try:
+        yield str(host), int(port)
+    finally:
+        listener.close()
+        thread.join(timeout=2.0)
+
+
+@contextlib.contextmanager
+def line_server() -> Iterator[tuple[tuple[str, int], list[bytes], threading.Event]]:
+    listener = socket.create_server(("127.0.0.1", 0))
+    received: list[bytes] = []
+    done = threading.Event()
+
+    def run() -> None:
+        try:
+            conn, _ = listener.accept()
+            with conn:
+                buffer = bytearray()
+                while True:
+                    data = conn.recv(65536)
+                    if not data:
+                        break
+                    buffer.extend(data)
+                    while b"\n" in buffer:
+                        line, _, rest = buffer.partition(b"\n")
+                        buffer[:] = rest
+                        received.append(line + b"\n")
+                        if line == b"COMMIT":
+                            conn.sendall(b"OK\n")
+        except OSError:
+            pass
+        finally:
+            listener.close()
+            done.set()
+
+    thread = threading.Thread(target=run, daemon=True, name="line-server")
+    thread.start()
+    host, port = listener.getsockname()[:2]
+    try:
+        yield (str(host), int(port)), received, done
+    finally:
+        listener.close()
+        thread.join(timeout=2.0)
+
+
+def collect_exact(chunks: queue.Queue[bytes], count: int, timeout: float = 2.0) -> bytes:
+    data = bytearray()
+    deadline = time.monotonic() + timeout
+    while len(data) < count:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError(f"received {len(data)} of {count} bytes before the deadline")
+        data.extend(chunks.get(timeout=remaining))
+    return bytes(data)
+
+
+def run_and_capture(
+    target: tuple[str, int],
+    plan: Plan,
+    payload: bytes,
+    *,
+    seed: int | str = 1234,
+) -> tuple[bytes, tuple[CanonicalEvent, ...]]:
+    with (
+        Proxy(target, plan, seed=seed, name="p0") as proxy,
+        socket.create_connection((proxy.host, proxy.port), timeout=10.0) as sock,
+    ):
+        sock.sendall(payload)
+        received = read_exact(sock, len(payload))
+        wait_until(lambda: len(proxy.canonical_events()) >= 2)
+        events = proxy.canonical_events()
+    return received, events
 
 
 def test_one_byte_round_trip(echo_server: tuple[str, int]) -> None:
@@ -477,12 +611,375 @@ def test_close_after_large_offset_splits_across_reads(
     assert status == "eof"
 
 
-def test_proxy_rejects_unwired_faults() -> None:
-    with pytest.raises(NotImplementedError):
-        Proxy(("127.0.0.1", 1), Plan(Latency(ms=1)))
+def test_proxy_accepts_all_static_faults() -> None:
+    plan = Plan(
+        Latency(ms=0),
+        Bandwidth(bytes_per_second=1000),
+        Fragment(max_bytes=10),
+        Reset(after_bytes=1),
+        CloseAfter(after_bytes=1),
+        Blackhole(after_bytes=1),
+        RefuseConnect(),
+    )
+    proxy = Proxy(("127.0.0.1", 1), plan)
+    assert proxy.plan == plan
 
 
-def test_proxy_rejects_armed_faults() -> None:
-    fault = CloseAfter(after=saw(b"X", side="server"), side="server")
-    with pytest.raises(NotImplementedError):
-        Proxy(("127.0.0.1", 1), Plan(fault))
+def test_zero_offset_fault_fires_without_client_data(echo_server: tuple[str, int]) -> None:
+    plan = Plan(CloseAfter(after_bytes=0, side="client"))
+    with (
+        Proxy(echo_server, plan, seed=0, name="p0") as proxy,
+        socket.create_connection((proxy.host, proxy.port), timeout=5.0) as sock,
+    ):
+        sock.settimeout(1.0)
+        assert sock.recv(1) == b""
+
+
+def test_proxy_accepts_armed_faults() -> None:
+    plan = Plan(
+        Reset(after=saw(b"A", side="client")),
+        CloseAfter(after=saw(b"B", side="server")),
+        Blackhole(after=saw(b"C", side="client")),
+    )
+    proxy = Proxy(("127.0.0.1", 1), plan)
+    assert proxy.plan == plan
+
+
+@pytest.mark.timing_sensitive
+def test_latency_delays_server_stream_inside_window(echo_server: tuple[str, int]) -> None:
+    payload = b"latency!"
+    plan = Plan(Latency(ms=200, side="server", window=(0, len(payload))))
+    with (
+        Proxy(echo_server, plan, seed=0, name="p0") as proxy,
+        socket.create_connection((proxy.host, proxy.port), timeout=10.0) as sock,
+    ):
+        started = time.monotonic()
+        sock.sendall(payload)
+        assert read_exact(sock, len(payload)) == payload
+        elapsed = time.monotonic() - started
+    assert elapsed >= 0.10
+
+
+def test_latency_same_seed_same_canonical_events(echo_server: tuple[str, int]) -> None:
+    payload = b"latency!"
+    plan = Plan(Latency(ms=1, side="server", window=(0, len(payload))))
+    first = run_and_capture(echo_server, plan, payload)
+    second = run_and_capture(echo_server, plan, payload)
+    assert first[0] == second[0] == payload
+    assert first[1] == second[1]
+    assert [event.kind for event in first[1]] == ["window_entered", "window_exited"]
+
+
+@pytest.mark.timing_sensitive
+def test_bandwidth_caps_server_stream_inside_window(echo_server: tuple[str, int]) -> None:
+    payload = b"b" * 2000
+    plan = Plan(Bandwidth(bytes_per_second=2000, side="server", window=(0, len(payload))))
+    with (
+        Proxy(echo_server, plan, seed=0, name="p0") as proxy,
+        socket.create_connection((proxy.host, proxy.port), timeout=10.0) as sock,
+    ):
+        started = time.monotonic()
+        sock.sendall(payload)
+        assert read_exact(sock, len(payload)) == payload
+        elapsed = time.monotonic() - started
+    assert elapsed >= 0.4
+
+
+def test_bandwidth_same_seed_same_canonical_events(echo_server: tuple[str, int]) -> None:
+    payload = b"b" * 100
+    plan = Plan(
+        Bandwidth(
+            bytes_per_second=between(1000, 2000),
+            side="server",
+            window=(0, len(payload)),
+        )
+    )
+    first = run_and_capture(echo_server, plan, payload)
+    second = run_and_capture(echo_server, plan, payload)
+    assert first[0] == second[0] == payload
+    assert first[1] == second[1]
+    assert resolve(plan, 1234, "p0", 0) == resolve(plan, 1234, "p0", 0)
+
+
+def test_fragment_forwards_exact_payload(echo_server: tuple[str, int]) -> None:
+    payload = bytes(range(256)) * 4
+    plan = Plan(Fragment(max_bytes=7, side="server"))
+    with (
+        Proxy(echo_server, plan, seed=0, name="p0") as proxy,
+        socket.create_connection((proxy.host, proxy.port), timeout=10.0) as sock,
+    ):
+        sock.sendall(payload)
+        assert read_exact(sock, len(payload)) == payload
+
+
+@pytest.mark.timing_sensitive
+def test_fragment_pieces_are_separate_latency_segments(echo_server: tuple[str, int]) -> None:
+    payload = b"f" * 40
+    plan = Plan(
+        Fragment(max_bytes=1, side="server", window=(0, len(payload))),
+        Latency(ms=5, side="server", window=(0, len(payload))),
+    )
+    with (
+        Proxy(echo_server, plan, seed=0, name="p0") as proxy,
+        socket.create_connection((proxy.host, proxy.port), timeout=10.0) as sock,
+    ):
+        started = time.monotonic()
+        sock.sendall(payload)
+        assert read_exact(sock, len(payload)) == payload
+        elapsed = time.monotonic() - started
+    assert elapsed >= 0.10
+
+
+def test_latency_logs_only_window_events_even_when_fragmented(
+    echo_server: tuple[str, int],
+) -> None:
+    payload = b"f" * 20
+    plan = Plan(
+        Fragment(max_bytes=1, side="server", window=(0, len(payload))),
+        Latency(ms=0, side="server", window=(0, len(payload))),
+    )
+    received, events = run_and_capture(echo_server, plan, payload)
+    assert received == payload
+    assert {event.kind for event in events} == {"window_entered", "window_exited"}
+    latency_events = [event for event in events if event.fault_index == 1]
+    assert [event.kind for event in latency_events] == ["window_entered", "window_exited"]
+
+
+def test_fragment_same_seed_same_canonical_events(echo_server: tuple[str, int]) -> None:
+    payload = b"f" * 100
+    plan = Plan(Fragment(max_bytes=7, side="server", window=(0, len(payload))))
+    first = run_and_capture(echo_server, plan, payload)
+    second = run_and_capture(echo_server, plan, payload)
+    assert first[0] == second[0] == payload
+    assert first[1] == second[1]
+
+
+def test_blackhole_client_side_drops_after_prefix() -> None:
+    with collecting_server() as (target, chunks, done):
+        plan = Plan(Blackhole(after_bytes=10, side="client"))
+        with (
+            Proxy(target, plan, seed=0, name="p0") as proxy,
+            socket.create_connection((proxy.host, proxy.port), timeout=5.0) as sock,
+        ):
+            sock.sendall(b"x" * 100)
+            assert collect_exact(chunks, 10) == b"x" * 10
+            with pytest.raises(queue.Empty):
+                chunks.get(timeout=0.2)
+            sock.sendall(b"y" * 100)
+            with pytest.raises(queue.Empty):
+                chunks.get(timeout=0.2)
+        assert done.wait(timeout=2.0)
+
+
+def test_blackhole_server_side_keeps_connection_open() -> None:
+    payload = b"s" * 100
+    with sending_server(payload) as target:
+        plan = Plan(Blackhole(after_bytes=10, side="server"))
+        with (
+            Proxy(target, plan, seed=0, name="p0") as proxy,
+            socket.create_connection((proxy.host, proxy.port), timeout=5.0) as sock,
+        ):
+            sock.settimeout(5.0)
+            assert read_exact(sock, 10) == b"s" * 10
+            sock.settimeout(0.3)
+            with pytest.raises(socket.timeout):
+                sock.recv(1)
+
+
+def run_blackhole_scenario(seed: int) -> tuple[bytes, tuple[CanonicalEvent, ...]]:
+    with collecting_server() as (target, chunks, done):
+        plan = Plan(Blackhole(after_bytes=10, side="client"))
+        with (
+            Proxy(target, plan, seed=seed, name="p0") as proxy,
+            socket.create_connection((proxy.host, proxy.port), timeout=5.0) as sock,
+        ):
+            sock.sendall(b"x" * 100)
+            prefix = collect_exact(chunks, 10)
+            wait_until(lambda: len(proxy.canonical_events()) >= 1)
+            events = proxy.canonical_events()
+        assert done.wait(timeout=2.0)
+    return prefix, events
+
+
+def test_blackhole_same_seed_same_prefix_and_events() -> None:
+    first = run_blackhole_scenario(1234)
+    second = run_blackhole_scenario(1234)
+    assert first[0] == second[0] == b"x" * 10
+    assert first[1] == second[1]
+    assert [event.kind for event in first[1]] == ["fired"]
+
+
+def run_refuse_scenario(
+    echo_server: tuple[str, int],
+) -> tuple[list[str], tuple[CanonicalEvent, ...]]:
+    plan = Plan(RefuseConnect(conn=nth(0)))
+    statuses: list[str] = []
+    with Proxy(echo_server, plan, seed=1234, name="p0") as proxy:
+        with socket.create_connection((proxy.host, proxy.port), timeout=5.0) as sock:
+            sock.settimeout(1.0)
+            try:
+                data = sock.recv(1)
+            except OSError:
+                statuses.append("reset")
+            else:
+                statuses.append("eof" if data == b"" else "more")
+
+        with socket.create_connection((proxy.host, proxy.port), timeout=5.0) as sock:
+            sock.sendall(b"ok")
+            assert read_exact(sock, 2) == b"ok"
+
+        wait_until(lambda: len(proxy.canonical_events()) >= 1)
+        events = proxy.canonical_events()
+    return statuses, events
+
+
+def test_refuse_connect_resets_selected_connection(echo_server: tuple[str, int]) -> None:
+    statuses, events = run_refuse_scenario(echo_server)
+    if sys.platform.startswith("linux"):
+        assert statuses == ["reset"]
+    else:
+        assert statuses[0] in {"reset", "eof"}
+    assert events == (
+        CanonicalEvent(
+            conn_index=0,
+            stream=None,
+            offset=0,
+            fault_index=0,
+            fault="RefuseConnect",
+            kind="fired",
+            params=None,
+        ),
+    )
+
+
+def test_refuse_connect_same_seed_same_status_and_events(echo_server: tuple[str, int]) -> None:
+    first = run_refuse_scenario(echo_server)
+    second = run_refuse_scenario(echo_server)
+    assert first == second
+
+
+def recv_until_eof_safe(sock: socket.socket) -> bytes:
+    chunks: list[bytes] = []
+    while True:
+        try:
+            chunk = sock.recv(65536)
+        except OSError:
+            break
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def run_armed_same_stream(
+    target: tuple[str, int],
+    chunks: list[bytes],
+) -> tuple[bytes, int | None, tuple[CanonicalEvent, ...]]:
+    plan = Plan(
+        CloseAfter(
+            after=saw(b"COMMIT", side="server", delta=2),
+            side="server",
+        )
+    )
+    with (
+        Proxy(target, plan, seed=0, name="p0") as proxy,
+        socket.create_connection((proxy.host, proxy.port), timeout=5.0) as sock,
+    ):
+        sock.settimeout(5.0)
+        for chunk in chunks:
+            with contextlib.suppress(OSError):
+                sock.sendall(chunk)
+        received = recv_until_eof_safe(sock)
+        wait_until(lambda: any(event.kind == "fired" for event in proxy.events))
+        fired = [event for event in proxy.events if event.kind == "fired"]
+        offset = fired[0].offset if fired else None
+        events = proxy.canonical_events()
+    return received, offset, events
+
+
+def test_armed_same_stream_anchor_is_chunk_invariant(echo_server: tuple[str, int]) -> None:
+    payload = b"BEGINCOMMITXY"
+    unsplit = run_armed_same_stream(echo_server, [payload])
+    split = run_armed_same_stream(echo_server, [bytes([byte]) for byte in payload])
+    assert unsplit[0] == split[0] == payload
+    assert unsplit[1] == split[1] == 13
+    assert unsplit[2] == split[2]
+
+
+def run_armed_same_stream_determinism(
+    target: tuple[str, int],
+) -> tuple[bytes, tuple[CanonicalEvent, ...]]:
+    plan = Plan(
+        CloseAfter(
+            after=saw(b"X", side="server", delta=between(0, 4)),
+            side="server",
+        )
+    )
+    with (
+        Proxy(target, plan, seed=1234, name="p0") as proxy,
+        socket.create_connection((proxy.host, proxy.port), timeout=5.0) as sock,
+    ):
+        sock.settimeout(5.0)
+        with contextlib.suppress(OSError):
+            sock.sendall(b"prefixXtail!!!!")
+        received = recv_until_eof_safe(sock)
+        wait_until(lambda: any(event.kind == "fired" for event in proxy.events))
+        events = proxy.canonical_events()
+    return received, events
+
+
+def test_armed_same_stream_is_deterministic_across_runs(
+    echo_server: tuple[str, int],
+) -> None:
+    first = run_armed_same_stream_determinism(echo_server)
+    second = run_armed_same_stream_determinism(echo_server)
+    assert first == second
+    assert [event.kind for event in first[1]] == ["fired"]
+
+
+def run_armed_cross_stream(
+    target: tuple[str, int],
+) -> tuple[bytes, tuple[CanonicalEvent, ...], tuple[CanonicalEvent, ...]]:
+    plan = Plan(CloseAfter(after=saw(b"X", side="client"), side="server"))
+    with (
+        Proxy(target, plan, seed=0, name="p0") as proxy,
+        socket.create_connection((proxy.host, proxy.port), timeout=5.0) as sock,
+    ):
+        sock.settimeout(5.0)
+        with contextlib.suppress(OSError):
+            sock.sendall(b"X" + b"y" * 200)
+        received = recv_until_eof_safe(sock)
+        wait_until(lambda: any(event.kind == "fired" for event in proxy.events))
+        raw = tuple(event for event in proxy.events if event.kind == "fired")
+        canonical = tuple(event for event in proxy.canonical_events() if event.kind == "fired")
+    return received, raw, canonical
+
+
+def test_armed_cross_stream_records_inexact_offset(echo_server: tuple[str, int]) -> None:
+    _, raw, canonical = run_armed_cross_stream(echo_server)
+    assert len(raw) == 1
+    assert raw[0].offset_exact is False
+    assert raw[0].stream == "server"
+    assert len(canonical) == 1
+    assert canonical[0].offset is None
+
+
+def test_armed_request_delivered_reply_blackholed() -> None:
+    with line_server() as (target, received, done):
+        plan = Plan(Blackhole(after=saw(b"COMMIT\n", side="client"), side="server"))
+        with (
+            Proxy(target, plan, seed=0, name="p0") as proxy,
+            socket.create_connection((proxy.host, proxy.port), timeout=5.0) as sock,
+        ):
+            sock.sendall(b"COMMIT\n")
+            wait_until(lambda: received == [b"COMMIT\n"])
+            sock.settimeout(0.3)
+            with pytest.raises(socket.timeout):
+                sock.recv(1)
+
+            wait_until(lambda: any(event.kind == "fired" for event in proxy.events))
+            fired = next(event for event in proxy.events if event.kind == "fired")
+            assert fired.offset_exact is False
+            canonical = [event for event in proxy.canonical_events() if event.kind == "fired"]
+            assert canonical[0].offset is None
+        assert done.wait(timeout=2.0)
