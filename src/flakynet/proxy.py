@@ -4,19 +4,68 @@ import asyncio
 import contextlib
 import logging
 import socket
+import struct
 import threading
+from collections.abc import Iterable
 from dataclasses import dataclass
 from types import TracebackType
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+from .faults import CloseAfter, Reset
+from .plan import Plan, StreamSide
+from .resolve import ArmedFault, ConnectionPlan, StaticFault, resolve
+
+if TYPE_CHECKING:
+    from .faults import Fault
 
 logger = logging.getLogger(__name__)
 
 _Direction = Literal["client_to_server", "server_to_client"]
+_TerminalAction = Literal["close", "reset"]
+
+
+class _TerminalFault(Exception):
+    """Internal signal that a pump applied a terminal fault."""
 
 
 def _close_socket(sock: socket.socket) -> None:
     with contextlib.suppress(OSError):
         sock.close()
+
+
+def _graceful_close_sockets(first: socket.socket, second: socket.socket) -> None:
+    for sock in (first, second):
+        with contextlib.suppress(OSError):
+            sock.shutdown(socket.SHUT_WR)
+    _close_socket(first)
+    _close_socket(second)
+
+
+def _reset_sockets(first: socket.socket, second: socket.socket) -> None:
+    linger = struct.pack("ii", 1, 0)
+    for sock in (first, second):
+        with contextlib.suppress(OSError):
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
+    _close_socket(first)
+    _close_socket(second)
+
+
+def _action_for(fault: StaticFault) -> _TerminalAction:
+    return "reset" if isinstance(fault.fault, Reset) else "close"
+
+
+def _faults_for(
+    faults: tuple[StaticFault | ArmedFault, ...],
+    stream: StreamSide,
+) -> tuple[StaticFault, ...]:
+    applicable = (
+        fault
+        for fault in faults
+        if isinstance(fault, StaticFault)
+        and fault.stream == stream
+        and isinstance(fault.fault, (Reset, CloseAfter))
+    )
+    return tuple(sorted(applicable, key=lambda fault: (fault.start, fault.fault_index)))
 
 
 @dataclass(slots=True)
@@ -33,7 +82,7 @@ class _ConnectionState:
 
 
 class Proxy:
-    """A small in-process TCP proxy with no fault injection.
+    """A small in-process TCP proxy with static CloseAfter/Reset faults.
 
     The proxy owns an asyncio loop in a daemon thread. Callers use the
     normal ``host``/``port`` socket address and never need to run a loop.
@@ -42,7 +91,9 @@ class Proxy:
     def __init__(
         self,
         target: tuple[str, int],
+        plan: Plan | Fault | Iterable[Fault] = (),
         *,
+        seed: int | str = 0,
         host: str = "127.0.0.1",
         name: str | None = None,
     ) -> None:
@@ -57,8 +108,11 @@ class Proxy:
             raise ValueError("name must be a non-empty string or None")
 
         self._target = (target_host, target_port)
+        self._plan = Plan.of(plan)
+        self._seed = seed
         self._bind_host = host
-        self._name = name or f"p{id(self):x}"
+        self._name = name or "p0"
+        self._validate_supported_plan()
 
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -92,6 +146,21 @@ class Proxy:
         return self._port
 
     @property
+    def plan(self) -> Plan:
+        """The normalized fault plan."""
+        return self._plan
+
+    @property
+    def seed(self) -> int | str:
+        """The seed used for per-connection resolution."""
+        return self._seed
+
+    @property
+    def name(self) -> str:
+        """The stable proxy name used in the resolution RNG key."""
+        return self._name
+
+    @property
     def active_connections(self) -> int:
         """Number of accepted connections that have not finished yet."""
         with self._lock:
@@ -114,6 +183,13 @@ class Proxy:
         """Whether the proxy loop thread is alive."""
         thread = self._thread
         return thread is not None and thread.is_alive()
+
+    def _validate_supported_plan(self) -> None:
+        for fault in self._plan:
+            if not isinstance(fault, (Reset, CloseAfter)):
+                raise NotImplementedError(f"{type(fault).__name__} is not wired into the pumps yet")
+            if fault.after is not None:
+                raise NotImplementedError("armed saw triggers are not wired into the pumps yet")
 
     def start(self) -> Proxy:
         """Bind an ephemeral port, start the loop thread, and return self."""
@@ -238,10 +314,21 @@ class Proxy:
             client.setblocking(False)
             index = self._next_index
             self._next_index += 1
+            try:
+                connection_plan = resolve(
+                    self._plan,
+                    self._seed,
+                    self._name,
+                    index,
+                )
+            except Exception:
+                _close_socket(client)
+                continue
+
             with self._lock:
                 self._active_connections += 1
 
-            task = loop.create_task(self._handle_client(loop, client, index))
+            task = loop.create_task(self._handle_client(loop, client, index, connection_plan))
             self._connection_tasks.add(task)
             task.add_done_callback(self._on_connection_done)
 
@@ -262,6 +349,7 @@ class Proxy:
         loop: asyncio.AbstractEventLoop,
         client: socket.socket,
         index: int,
+        connection_plan: ConnectionPlan,
     ) -> None:
         upstream = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         upstream.setblocking(False)
@@ -273,7 +361,15 @@ class Proxy:
 
             state = _ConnectionState(index=index)
             try:
-                await self._run_pumps(loop, client, upstream, state)
+                await self._run_pumps(
+                    loop,
+                    client,
+                    upstream,
+                    state,
+                    connection_plan,
+                )
+            except _TerminalFault:
+                pass
             except (ConnectionResetError, BrokenPipeError, OSError):
                 logger.debug(
                     "connection %d ended with an error",
@@ -290,7 +386,10 @@ class Proxy:
         client: socket.socket,
         upstream: socket.socket,
         state: _ConnectionState,
+        connection_plan: ConnectionPlan,
     ) -> None:
+        client_faults = _faults_for(connection_plan.faults, "client")
+        server_faults = _faults_for(connection_plan.faults, "server")
         client_to_server = loop.create_task(
             self._pump(
                 loop,
@@ -298,6 +397,7 @@ class Proxy:
                 upstream,
                 "client_to_server",
                 state,
+                client_faults,
             )
         )
         server_to_client = loop.create_task(
@@ -307,6 +407,7 @@ class Proxy:
                 client,
                 "server_to_client",
                 state,
+                server_faults,
             )
         )
         tasks = (client_to_server, server_to_client)
@@ -334,23 +435,89 @@ class Proxy:
         destination: socket.socket,
         direction: _Direction,
         state: _ConnectionState,
+        faults: tuple[StaticFault, ...],
     ) -> None:
+        terminal = False
         try:
-            while True:
-                data = await loop.sock_recv(source, 65536)
-                if not data:
-                    break
-                await loop.sock_sendall(destination, data)
-
-                state.add(direction, len(data))
-                with self._lock:
-                    if direction == "client_to_server":
-                        self._client_to_server += len(data)
-                    else:
-                        self._server_to_client += len(data)
+            action = await self._forward_with_faults(
+                loop,
+                source,
+                destination,
+                direction,
+                state,
+                faults,
+            )
+            if action is not None:
+                terminal = True
+                if action == "reset":
+                    _reset_sockets(source, destination)
+                else:
+                    _graceful_close_sockets(source, destination)
+                raise _TerminalFault
         finally:
-            with contextlib.suppress(OSError):
-                destination.shutdown(socket.SHUT_WR)
+            if not terminal:
+                with contextlib.suppress(OSError):
+                    destination.shutdown(socket.SHUT_WR)
+
+    async def _forward_with_faults(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        source: socket.socket,
+        destination: socket.socket,
+        direction: _Direction,
+        state: _ConnectionState,
+        faults: tuple[StaticFault, ...],
+    ) -> _TerminalAction | None:
+        fault_index = 0
+        offset = 0
+
+        while True:
+            if fault_index < len(faults) and faults[fault_index].start <= offset:
+                return _action_for(faults[fault_index])
+
+            data = await loop.sock_recv(source, 65536)
+            if not data:
+                return None
+
+            position = 0
+            while position < len(data):
+                if fault_index >= len(faults):
+                    count = len(data) - position
+                    await loop.sock_sendall(destination, data[position:])
+                    self._advance(direction, state, count)
+                    offset += count
+                    position += count
+                    continue
+
+                distance = faults[fault_index].start - offset
+                if distance <= 0:
+                    return _action_for(faults[fault_index])
+
+                available = len(data) - position
+                count = min(available, distance)
+                await loop.sock_sendall(
+                    destination,
+                    data[position : position + count],
+                )
+                self._advance(direction, state, count)
+                offset += count
+                position += count
+
+                if count == distance:
+                    return _action_for(faults[fault_index])
+
+    def _advance(
+        self,
+        direction: _Direction,
+        state: _ConnectionState,
+        count: int,
+    ) -> None:
+        state.add(direction, count)
+        with self._lock:
+            if direction == "client_to_server":
+                self._client_to_server += count
+            else:
+                self._server_to_client += count
 
     async def _cancel_connections(self) -> None:
         tasks = list(self._connection_tasks)

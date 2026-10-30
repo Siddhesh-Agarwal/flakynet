@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import socket
 import struct
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -10,7 +11,16 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from flakynet import Proxy
+from flakynet import (
+    CloseAfter,
+    Latency,
+    Plan,
+    Proxy,
+    Reset,
+    between,
+    resolve,
+    saw,
+)
 
 
 def _send_all(sock: socket.socket, payload: bytes, errors: list[BaseException]) -> None:
@@ -68,6 +78,63 @@ def abort_first_connection(proxy: Proxy) -> None:
         sock.settimeout(2.0)
         with contextlib.suppress(OSError):
             sock.recv(1)
+
+
+def read_exact(sock: socket.socket, count: int) -> bytes:
+    data = bytearray()
+    while len(data) < count:
+        chunk = sock.recv(count - len(data))
+        if not chunk:
+            raise AssertionError(f"EOF after {len(data)} of {count} bytes")
+        data.extend(chunk)
+    return bytes(data)
+
+
+def read_prefix_and_end(sock: socket.socket, count: int) -> tuple[bytes, str]:
+    prefix = read_exact(sock, count)
+    try:
+        extra = sock.recv(1)
+    except OSError:
+        return prefix, "reset"
+    if extra == b"":
+        return prefix, "eof"
+    return prefix + extra, "more"
+
+
+@contextlib.contextmanager
+def recording_server() -> Iterator[tuple[tuple[str, int], list[bytes], threading.Event]]:
+    listener = socket.create_server(("127.0.0.1", 0))
+    received: list[bytes] = []
+    done = threading.Event()
+
+    def run() -> None:
+        try:
+            conn, _ = listener.accept()
+            with conn:
+                data = bytearray()
+                while True:
+                    try:
+                        chunk = conn.recv(65536)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    data.extend(chunk)
+                received.append(bytes(data))
+        except OSError:
+            pass
+        finally:
+            listener.close()
+            done.set()
+
+    thread = threading.Thread(target=run, daemon=True, name="recording-server")
+    thread.start()
+    host, port = listener.getsockname()[:2]
+    try:
+        yield (str(host), int(port)), received, done
+    finally:
+        listener.close()
+        thread.join(timeout=2.0)
 
 
 @contextlib.contextmanager
@@ -278,3 +345,144 @@ def test_upstream_connect_failure_closes_client() -> None:
             sock.settimeout(2.0)
             assert sock.recv(1) == b""
         wait_until(lambda: proxy.active_connections == 0)
+
+
+def test_close_after_server_side_exact_prefix(echo_server: tuple[str, int]) -> None:
+    fault = CloseAfter(after_bytes=10, side="server")
+    with (
+        Proxy(echo_server, Plan(fault), seed=0, name="p0") as proxy,
+        socket.create_connection((proxy.host, proxy.port), timeout=5.0) as sock,
+    ):
+        sock.sendall(b"x" * 1024)
+        prefix, status = read_prefix_and_end(sock, 10)
+        assert prefix == b"x" * 10
+        assert status == "eof"
+
+
+def test_reset_server_side_exact_prefix(echo_server: tuple[str, int]) -> None:
+    fault = Reset(after_bytes=10, side="server")
+    with (
+        Proxy(echo_server, Plan(fault), seed=0, name="p0") as proxy,
+        socket.create_connection((proxy.host, proxy.port), timeout=5.0) as sock,
+    ):
+        sock.sendall(b"x" * 1024)
+        prefix, status = read_prefix_and_end(sock, 10)
+        assert prefix == b"x" * 10
+        if sys.platform.startswith("linux"):
+            assert status == "reset"
+        else:
+            assert status in {"reset", "eof"}
+
+
+def test_close_after_client_side_exact_prefix() -> None:
+    with recording_server() as (target, received, done):
+        fault = CloseAfter(after_bytes=10, side="client")
+        with (
+            Proxy(target, Plan(fault), seed=0, name="p0") as proxy,
+            socket.create_connection(
+                (proxy.host, proxy.port),
+                timeout=5.0,
+            ) as sock,
+        ):
+            with contextlib.suppress(OSError):
+                sock.sendall(b"x" * 1024)
+            assert done.wait(timeout=2.0)
+        assert received == [b"x" * 10]
+
+
+def test_reset_client_side_exact_prefix() -> None:
+    with recording_server() as (target, received, done):
+        fault = Reset(after_bytes=10, side="client")
+        with (
+            Proxy(target, Plan(fault), seed=0, name="p0") as proxy,
+            socket.create_connection(
+                (proxy.host, proxy.port),
+                timeout=5.0,
+            ) as sock,
+        ):
+            with contextlib.suppress(OSError):
+                sock.sendall(b"x" * 1024)
+            assert done.wait(timeout=2.0)
+        assert received == [b"x" * 10]
+
+
+def test_close_after_same_seed_same_prefix(echo_server: tuple[str, int]) -> None:
+    plan = Plan(CloseAfter(after_bytes=between(100, 1000), side="server"))
+    expected = resolve(plan, 1234, "p0", 0).faults[0].start
+    observed: list[int] = []
+
+    for _ in range(2):
+        with (
+            Proxy(echo_server, plan, seed=1234, name="p0") as proxy,
+            socket.create_connection(
+                (proxy.host, proxy.port),
+                timeout=5.0,
+            ) as sock,
+        ):
+            sock.sendall(b"x" * 4096)
+            prefix, status = read_prefix_and_end(sock, expected)
+            assert prefix == b"x" * expected
+            assert status == "eof"
+            observed.append(len(prefix))
+
+    assert observed == [expected, expected]
+
+
+def test_reset_same_seed_same_prefix(echo_server: tuple[str, int]) -> None:
+    plan = Plan(Reset(after_bytes=between(100, 1000), side="server"))
+    expected = resolve(plan, 1234, "p0", 0).faults[0].start
+    observed: list[int] = []
+
+    for _ in range(2):
+        with (
+            Proxy(echo_server, plan, seed=1234, name="p0") as proxy,
+            socket.create_connection(
+                (proxy.host, proxy.port),
+                timeout=5.0,
+            ) as sock,
+        ):
+            sock.sendall(b"x" * 4096)
+            prefix, status = read_prefix_and_end(sock, expected)
+            assert prefix == b"x" * expected
+            if sys.platform.startswith("linux"):
+                assert status == "reset"
+            else:
+                assert status in {"reset", "eof"}
+            observed.append(len(prefix))
+
+    assert observed == [expected, expected]
+
+
+def test_close_after_large_offset_splits_across_reads(
+    echo_server: tuple[str, int],
+) -> None:
+    payload = b"x" * 200_000
+    fault = CloseAfter(after_bytes=70_000, side="server")
+    with (
+        Proxy(echo_server, Plan(fault), seed=0, name="p0") as proxy,
+        socket.create_connection((proxy.host, proxy.port), timeout=10.0) as sock,
+    ):
+        errors: list[BaseException] = []
+        sender = threading.Thread(
+            target=_send_all,
+            args=(sock, payload, errors),
+            daemon=True,
+        )
+        sender.start()
+        prefix, status = read_prefix_and_end(sock, 70_000)
+        sender.join(timeout=10.0)
+
+    assert not sender.is_alive()
+    assert prefix == b"x" * 70_000
+    assert status == "eof"
+
+
+def test_proxy_rejects_unwired_faults() -> None:
+    with pytest.raises(NotImplementedError):
+        Proxy(("127.0.0.1", 1), Plan(Latency(ms=1)))
+
+
+def test_proxy_rejects_armed_faults() -> None:
+    fault = CloseAfter(after=saw(b"X", side="server"), side="server")
+    with pytest.raises(NotImplementedError):
+        Proxy(("127.0.0.1", 1), Plan(fault))
