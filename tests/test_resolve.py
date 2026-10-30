@@ -1,7 +1,7 @@
 from typing import Any, cast
 
 import pytest
-from hypothesis import given
+from hypothesis import assume, given
 from hypothesis import strategies as st
 
 from flakynet.faults import (
@@ -22,6 +22,24 @@ from flakynet.resolve import (
     resolve,
     rng_key,
 )
+
+
+def _complex_plan() -> Plan:
+    return Plan(
+        Latency(ms=10, jitter_ms=5),
+        Fragment(
+            max_bytes=3,
+            side="server",
+            window=(between(0, 1000), between(1001, 5000)),
+        ),
+        Bandwidth(bytes_per_second=between(1, 1000), side="client"),
+        Reset(after_bytes=between(0, 1000), side="server"),
+        Blackhole(
+            after=saw(b"COMMIT", side="client", delta=between(0, 10)),
+            side="server",
+        ),
+        CloseAfter(after=saw(b"BYE", side="server"), side="client"),
+    )
 
 
 def test_rng_key_is_stable_and_includes_all_components():
@@ -167,3 +185,82 @@ def test_armed_resolution_is_deterministic():
     a = resolve(plan, 7, "p0", 0)
     b = resolve(plan, 7, "p0", 0)
     assert a == b
+
+
+def test_different_connection_indexes_produce_different_draws():
+    plan = Plan(Reset(after_bytes=between(0, 10**12)))
+    first = resolve(plan, 0, "p0", 0)
+    second = resolve(plan, 0, "p0", 1)
+    assert first.faults != second.faults
+
+
+def test_different_proxy_names_produce_different_draws():
+    plan = Plan(Reset(after_bytes=between(0, 10**12)))
+    first = resolve(plan, 0, "p0", 0)
+    second = resolve(plan, 0, "p1", 0)
+    assert first.faults != second.faults
+
+
+@given(
+    seed=st.integers(min_value=0, max_value=10_000),
+    proxy_name=st.text(alphabet="p0123456789", min_size=1, max_size=4),
+    conn_index=st.integers(min_value=0, max_value=20),
+)
+def test_complex_plan_resolution_is_reproducible(seed, proxy_name, conn_index):
+    plan = _complex_plan()
+    assert resolve(plan, seed, proxy_name, conn_index) == resolve(
+        plan,
+        seed,
+        proxy_name,
+        conn_index,
+    )
+
+
+@given(
+    seed=st.integers(min_value=0, max_value=10_000),
+    proxy_name=st.text(alphabet="p0123456789", min_size=1, max_size=4),
+    conn_a=st.integers(min_value=0, max_value=50),
+    conn_b=st.integers(min_value=0, max_value=50),
+)
+def test_different_connection_indexes_use_independent_streams(
+    seed,
+    proxy_name,
+    conn_a,
+    conn_b,
+):
+    assume(conn_a != conn_b)
+    plan = _complex_plan()
+    first = resolve(plan, seed, proxy_name, conn_a)
+    second = resolve(plan, seed, proxy_name, conn_b)
+    assert first.rng_key != second.rng_key
+
+
+@given(
+    seed=st.integers(min_value=0, max_value=10_000),
+    name_a=st.text(alphabet="p0123456789", min_size=1, max_size=4),
+    name_b=st.text(alphabet="p0123456789", min_size=1, max_size=4),
+    conn_index=st.integers(min_value=0, max_value=50),
+)
+def test_different_proxy_names_use_independent_streams(
+    seed,
+    name_a,
+    name_b,
+    conn_index,
+):
+    assume(name_a != name_b)
+    plan = _complex_plan()
+    first = resolve(plan, seed, name_a, conn_index)
+    second = resolve(plan, seed, name_b, conn_index)
+    assert first.rng_key != second.rng_key
+
+
+@given(
+    seed=st.integers(min_value=0, max_value=10_000),
+    proxy_name=st.text(alphabet="p0123456789", min_size=1, max_size=4),
+)
+def test_connection_five_does_not_depend_on_connection_two(seed, proxy_name):
+    plan = _complex_plan()
+    alone = resolve(plan, seed, proxy_name, 5)
+    _ = resolve(plan, seed, proxy_name, 2)
+    after = resolve(plan, seed, proxy_name, 5)
+    assert alone == after

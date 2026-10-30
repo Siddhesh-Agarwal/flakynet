@@ -52,6 +52,14 @@ def test_plan_is_iterable_in_order():
     assert list(Plan(first, second)) == [first, second]
 
 
+def test_plan_repr_is_stable_and_address_free():
+    plan = Plan(Reset(after_bytes=between(1, 2)), Reset(after_bytes=3))
+    same = Plan(Reset(after_bytes=between(1, 2)), Reset(after_bytes=3))
+    assert repr(plan) == repr(same)
+    assert repr(plan).startswith("Plan(")
+    assert "0x" not in repr(plan)
+
+
 def test_between_rejects_non_integer_bounds():
     with pytest.raises(TypeError):
         between(cast(Any, 0.5), cast(Any, 2.5))
