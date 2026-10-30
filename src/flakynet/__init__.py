@@ -11,6 +11,7 @@ from .faults import (
 )
 from .matcher import Matcher
 from .plan import ALL, Plan, between, every, nth, saw
+from .proxy import Proxy
 from .resolve import ArmedFault, ConnectionPlan, StaticFault, resolve
 
 __version__ = "0.1.0"
@@ -26,6 +27,7 @@ __all__ = [
     "Latency",
     "Matcher",
     "Plan",
+    "Proxy",
     "RefuseConnect",
     "Reset",
     "StaticFault",
