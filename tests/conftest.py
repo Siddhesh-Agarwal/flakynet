@@ -8,6 +8,8 @@ from collections.abc import Iterator
 
 import pytest
 
+pytest_plugins = ["pytester"]
+
 
 class _EchoHandler(socketserver.BaseRequestHandler):
     def handle(self) -> None:

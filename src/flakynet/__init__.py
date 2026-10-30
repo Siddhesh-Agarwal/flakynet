@@ -1,5 +1,6 @@
 """Seeded, reproducible network faults for testing real clients over real sockets."""
 
+from .api import proxy
 from .events import CanonicalEvent, Event
 from .faults import (
     Bandwidth,
@@ -53,6 +54,7 @@ __all__ = [
     "between",
     "every",
     "nth",
+    "proxy",
     "resolve",
     "saw",
 ]

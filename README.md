@@ -37,7 +37,7 @@ with fn.proxy(("127.0.0.1", 5432), plan, seed=7) as p:    # starts on enter, sto
     conn = psycopg.connect(host=p.host, port=p.port, dbname="test")
     ...
     p.assert_all_fired()          # fails if a fault was reachable but never fired
-    print(p.canonical_events())   # stable, comparable across runs
+    print(p.canonical_events())   # compare with identical stream bytes; see limits below
 ```
 
 **Plans.** `Plan(*faults)` is the canonical form. `proxy()` also accepts a
@@ -49,8 +49,9 @@ single fault or any iterable of faults and normalizes them, so
 client sends, `"server"` is what the server sends. `saw(..., side=...)` names
 the stream it watches.
 
-**Seeds.** `seed` defaults to `0`, so runs are deterministic unless you ask
-for variety (explicit seeds, or `--flakynet-sweep`).
+**Seeds.** `seed` defaults to `0`, so phase-1 plans are deterministic unless
+you ask for variety (explicit seeds, or `--flakynet-sweep`). Runtime event
+occurrence still depends on scheduling; see the limits below.
 
 ### With pytest
 
@@ -62,15 +63,48 @@ def test_redis_survives(flakynet):   # flakynet is a factory, not a started prox
 ```
 
 `flakynet.proxy(...)` returns an already-started proxy and stops it when the
-test ends; you can create several per test. The seed is chosen in this order:
-an explicit `seed=` in the test (pinned), then `--flakynet-seed`, then the
-current `--flakynet-sweep` value, then `0`. When a test using a proxy fails,
-the report prints each proxy's name, seed, plan and the exact replay command.
+test ends; you can create several per test. Unnamed proxies are called `p0`,
+`p1`, ... in creation order. The seed is chosen in this order: an explicit
+`seed=` in the test (pinned), then `--flakynet-seed`, then the current
+`--flakynet-sweep` value, then `0`. When a test using a proxy fails, the report
+prints each proxy's name, effective seed, whether it was pinned, `repr(plan)`
+and the exact replay command.
 
 ```
 pytest --flakynet-seed=7        # replay one failing run
-pytest --flakynet-sweep=200     # try seeds 0..199 and report the failing seed + plan
+pytest --flakynet-sweep=200     # try seeds 0..199; stop at the first failing seed
 ```
+
+### Integration tests
+
+The `integration` suite runs real `redis-py`, `psycopg`, `httpx`, and
+`aiohttp` clients against real services. It is marked `integration`; the
+normal `pytest` run skips it when the optional clients or services are absent.
+
+Start Redis and PostgreSQL with the bundled compose file:
+
+```sh
+docker compose up -d
+```
+
+Install the optional clients and run the suite:
+
+```sh
+uv sync --group integration
+uv run pytest -m integration
+```
+
+The Redis and PostgreSQL URLs default to
+`redis://127.0.0.1:6379/0` and
+`postgresql://postgres:postgres@127.0.0.1:5432/postgres`. Override them with
+`FLAKYNET_REDIS_URL` and `FLAKYNET_POSTGRES_DSN` when your services live
+elsewhere; the PostgreSQL DSN must use a TCP host and port. The `httpx` and
+`aiohttp` tests start their own local HTTP server; only Redis and PostgreSQL
+need external processes. CI runs this suite in a separate job with Redis and
+PostgreSQL service containers.
+
+Observed client behaviour and review candidates are recorded in
+[`docs/bug-zoo.md`](./docs/bug-zoo.md).
 
 ## Faults (v0.1 plan)
 
@@ -93,8 +127,9 @@ writes after splitting at fault boundaries, so every `Fragment` piece is its
 own segment. The delay for segment `n` is planned exactly and replays, but
 **which bytes receive which delay is not replayable**: the OS decides how reads
 are chunked, and the chunking decides where segments end. `Latency` logs only
-`window_entered` and `window_exited` events, never per-segment events, so its
-`canonical_events()` stay stable. Measured elapsed time is not promised.
+`window_entered` and `window_exited`, never per-segment events, so its event
+vocabulary does not expose which bytes received which delay. Measured elapsed
+time is not promised.
 
 **`Bandwidth` draws its rate once per connection and stream** at accept time.
 The rate is part of the resolved plan; actual measured throughput is not
@@ -107,50 +142,73 @@ model TCP backpressure on the sender.
 
 ## How determinism works (and what it does not promise)
 
-**Triggers are byte offsets; pacing happens after the trigger.** Faults start
-and end at positions in a stream, not at timers and not at however the OS
-happened to chunk a read. `Latency` and `Bandwidth` are time-based by nature:
-the offset window decides _where_ they apply, and the delay or rate is applied
-to the bytes inside it.
+**The seed pins phase-1 resolution, not the runtime schedule.** For each
+connection, `(seed, proxy name, connection index)` deterministically chooses
+which faults apply, their static offsets/windows, bandwidth rates, armed
+deltas, and the latency jitter key. No runtime code draws from a shared RNG,
+and the process-wide `random` state is irrelevant. Faults are still triggered
+by byte offsets, not by timers: `Latency` and `Bandwidth` select bytes with an
+offset window and apply pacing inside it.
 
-**Two phases.**
+**Deterministic offsets need a deterministic byte stream.** For a single
+connection with identical bytes in each direction and identical close
+boundaries, static faults and same-stream `saw` anchors produce identical
+offsets. Their event entries are identical when the stream is allowed to reach
+the same end. The matcher is chunk-invariant, and the pump splits at fault
+boundaries, so OS read sizes do not move a static offset or a same-stream
+anchor. `Latency` logs only `window_entered`/`window_exited`, never
+per-segment delays.
 
-1. _At accept time_ each connection's plan is resolved from
-   `(seed, proxy name, connection index)`. All random choices are made here:
-   offsets, windows, rates, and the seed for per-segment latency jitter. Faults whose position is known
-   now are _static_.
-2. _While data flows_, faults triggered by `saw(...)` are _armed_. When the
-   pattern completes at stream offset `M`, a fault on the same stream anchors
-   at `M` (plus any pre-drawn extra bytes) and from then on behaves like a
-   static one. No new random numbers are drawn at runtime.
+**What is not deterministic:**
 
-A fault on the _other_ stream than the one being watched (as in the
-`Blackhole` example above) starts with the next byte forwarded after the
-pattern completes. The offset it lands on is recorded, but it is only
-reproducible for request/response protocols, where the other side cannot send
-before it has been asked.
+- _Arrival order and timestamps._ `events` is diagnostic only.
+  `canonical_events()` sorts and strips those fields, but sorting cannot make a
+  scheduling-dependent event _happen_.
+- _Concurrent connection indices._ The index is assigned in accept order. Under
+  simultaneous connects the OS decides that order, so the mapping from a client
+  to `p0`, `p1`, ... (and therefore to its resolved plan) can change. Compare
+  per-connection event sequences, or serialize connects when client identity
+  matters.
+- _Cross-stream `saw` faults._ These activate on the next byte forwarded in the
+  target stream. The actual offset is recorded with `offset_exact=False` and
+  canonicalized to `offset=None`. If the target stream has already closed, the
+  fault never fires at all. Replay is reliable only for request/response
+  protocols where the target cannot finish before the trigger.
+- _Competing terminals and closing races._ A `Reset`/`CloseAfter` closes both
+  sockets and cancels the sibling pump. If terminals race on both streams, the
+  winning stream, and whether both `fired` events appear, can vary. A terminal
+  can also cancel the sibling before it logs
+  `window_entered`/`window_exited`, so window events on that stream may be
+  partial or absent. `stop()` cancels in-flight pumps in the same way.
+- _Chunking-dependent pacing._ Static offsets and same-stream anchors are
+  chunk-invariant, but `Latency` segment boundaries (and therefore which bytes
+  get which delay) and `Bandwidth` segment sizes/timing follow OS reads.
+- _Measured time._ Planned values are fixed, but actual elapsed time,
+  throughput, and the interleaving of the two pumps are not. No fault value is
+  computed from measured elapsed time.
+- _Application and platform behaviour._ Different bytes, close timing, or
+  server responses change content-dependent triggers, stream lengths, and
+  cross-stream races. RST vs FIN and bytes in flight at close are OS-dependent.
+- _Python runtime versions._ Seed replay is tested within a Python runtime;
+  cross-version equality of the standard-library RNG is not part of the
+  promise.
+- _Report statuses._ `PREEMPTED`, `ENDED_EARLY`, `MISSED`, and `PENDING` can
+  follow the same races; take the report after the client has finished.
 
 **Replaying and comparing.** `proxy.events` is in arrival order and is not
 stable between runs. Each event records the connection, stream, offset,
 whether the offset is exact, fault index, fault name, kind, resolved planned
 parameters, sequence number, and monotonic timestamp. `proxy.canonical_events()`
 sorts by `(connection, stream, offset, fault_index, kind)` and removes the
-sequence number and timestamp; a non-exact offset becomes `None`. Compare
-`canonical_events()`, never arrival order. Window faults log
-`window_entered` and `window_exited`; discrete faults log `fired`. `Latency`
-logs only the two window events, never one per segment.
+sequence number and timestamp; a non-exact offset becomes `None`. Window faults
+log `window_entered` and `window_exited`; discrete faults log `fired`.
+`Latency` logs only the two window events, never one per segment.
 
-**What the seed pins:** which faults apply to which connection, their offsets
-and windows, and their planned parameters (rate, extra bytes after a match,
-and the delay assigned to the n-th forwarded segment).
-
-**What it does not pin:** OS scheduling or measured elapsed time; how the OS
-chunks reads, and therefore which bytes get which `Latency` delay (the delay
-values replay by segment number, but their placement on bytes does not); the
-bytes your application sends (offsets that depend on content are reproducible
-only if the content is identical); and connection numbering, which follows accept
-order, so it is stable only if your client opens connections in a
-deterministic order.
+Use `canonical_events()` for the part the seed pins. When comparing concurrent
+connections, compare the multiset of per-connection event sequences, not the
+mapping to clients. A difference in a cross-stream occurrence, a terminal race,
+or a sibling window event is a scheduling difference, not a seed defect.
+`tests/test_determinism_limits.py` pins these limits.
 
 ## Fault reports
 
@@ -208,7 +266,8 @@ Record and replay of streams may arrive later as a separate module.
 ```sh
 uv sync
 uv run pytest
-uv run ruff check && uv run ty check
+uv run pytest -m integration      # after starting the services above
+uv run ruff check && uv run pyright
 ```
 
 See [`AGENT.md`](./AGENT.md) for design rules and contributor guidance.
