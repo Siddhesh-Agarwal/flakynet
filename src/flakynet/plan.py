@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import random
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, TypeAlias
 
 if TYPE_CHECKING:
+    import random
+
     from .faults import Fault
 
 Side: TypeAlias = Literal["client", "server", "both"]
@@ -130,7 +131,7 @@ class Plan:
     faults: tuple[Fault, ...]
 
     def __init__(self, *faults: Fault) -> None:
-        from .faults import FAULT_TYPES
+        from .faults import FAULT_TYPES  # noqa: PLC0415 - avoids a circular import
 
         if not all(isinstance(fault, FAULT_TYPES) for fault in faults):
             raise TypeError("Plan() expected Fault instances")
@@ -142,7 +143,7 @@ class Plan:
     @classmethod
     def of(cls, value: Plan | Fault | Iterable[Fault]) -> Plan:
         """Normalize a Plan, one fault, or an iterable of faults."""
-        from .faults import FAULT_TYPES
+        from .faults import FAULT_TYPES  # noqa: PLC0415 - avoids a circular import
 
         if isinstance(value, Plan):
             return value

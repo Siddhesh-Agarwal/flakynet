@@ -70,7 +70,7 @@ def test_negative_connection_index_rejected():
 
 def test_non_integer_connection_index_rejected():
     with pytest.raises(TypeError):
-        resolve(Plan(), 0, "p0", cast(Any, 0.5))
+        resolve(Plan(), 0, "p0", cast("Any", 0.5))
 
 
 def test_conn_selector_skips_other_connections():
@@ -170,7 +170,7 @@ def test_latency_delay_rejects_invalid_ordinal():
     with pytest.raises(ValueError):
         latency_delay_ms(params, "server", -1)
     with pytest.raises(TypeError):
-        latency_delay_ms(params, "server", cast(Any, 1.0))
+        latency_delay_ms(params, "server", cast("Any", 1.0))
 
 
 def test_bandwidth_fixed_rate_is_exact_for_each_stream():
@@ -240,7 +240,10 @@ def test_resolution_is_reproducible_for_arbitrary_inputs(seed, proxy_name, conn_
     lo, hi = min(lo, hi), max(lo, hi)
     plan = Plan(Reset(after_bytes=between(lo, hi)))
     assert resolve(plan, seed, proxy_name, conn_index) == resolve(
-        plan, seed, proxy_name, conn_index
+        plan,
+        seed,
+        proxy_name,
+        conn_index,
     )
 
 

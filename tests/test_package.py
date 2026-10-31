@@ -45,7 +45,8 @@ def test_public_api_has_docstrings():
     ]
     for name in names:
         doc = getattr(fn, name).__doc__
-        assert doc and doc.strip(), name
+        assert doc, name
+        assert doc.strip(), name
 
 
 def test_latency_docstring_states_segment_caveat():

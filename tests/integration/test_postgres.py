@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 from support import fired, running_proxy, wait_until
 
@@ -16,10 +18,13 @@ def postgres_target(dsn: str) -> tuple[str, int]:
 
 
 def proxied_dsn(proxy, dsn: str) -> str:
-    return psycopg.conninfo.make_conninfo(
-        dsn,
-        host=proxy.host,
-        port=proxy.port,
+    return cast(
+        "str",
+        psycopg.conninfo.make_conninfo(
+            dsn,
+            host=proxy.host,
+            port=proxy.port,
+        ),
     )
 
 

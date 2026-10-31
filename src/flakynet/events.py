@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import TYPE_CHECKING, TypeAlias
 
-from .plan import StreamSide
-from .resolve import ResolvedParams
+if TYPE_CHECKING:
+    from .plan import StreamSide
+    from .resolve import ResolvedParams
 
 EventKind: TypeAlias = str
 """The kind of runtime observation.

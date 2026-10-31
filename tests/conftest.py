@@ -4,9 +4,12 @@ import contextlib
 import socket
 import socketserver
 import threading
-from collections.abc import Iterator
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 pytest_plugins = ["pytester"]
 

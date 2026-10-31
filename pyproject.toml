@@ -17,7 +17,7 @@ dev = [
     "pytest>=8",
     "hypothesis>=6",
     "ruff>=0.6",
-    "pyright>=1.1",
+    "ty>=0.0.95",
 ]
 integration = [
     "aiohttp>=3.9",
@@ -47,12 +47,51 @@ line-length = 100
 extend-exclude = ["README.md", "docs"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# Strict: enable every rule, then opt out only for rules that conflict with
+# the project's deliberate conventions. Correctness rules stay enabled.
+select = ["ALL"]
+ignore = [
+    "ANN",      # ty enforces types; tests intentionally omit annotations
+    "C901",     # complexity is reviewed manually
+    "COM812",   # the formatter owns trailing-comma placement
+    "CPY",      # no copyright headers
+    "D",        # docstring style is not enforced
+    "EM",       # exception message construction style
+    "PLR0912",  # too many branches
+    "PLR0913",  # too many arguments
+    "PLR0915",  # too many statements
+    "PLR0917",  # too many positional arguments
+    "PYI034",   # __enter__ returning Self needs typing_extensions on 3.10
+    "S311",     # non-cryptographic random is the point
+    "TRY003",   # exception message construction style
+]
 
-[tool.pyright]
-typeCheckingMode = "strict"
-pythonVersion = "3.10"
-include = ["src"]
-exclude = ["**/__pycache__"]
-# Public constructors validate untrusted/untyped inputs at runtime.
-reportUnnecessaryIsInstance = false
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "INP001",   # test directories intentionally have no __init__.py
+    "PLC0415",  # tests import helpers locally
+    "PLR2004",  # test payload sizes are clearer as literals
+    "PT011",    # tests intentionally use broad pytest.raises
+    "S101",     # tests use assert
+    "S603",     # subprocess runs a fixed list of arguments
+    "T20",      # tests print diagnostics
+]
+
+[tool.ty.rules]
+all = "error"
+# Python 3.10 has no stdlib @override; the test servers override stdlib hooks.
+missing-override-decorator = "ignore"
+
+[tool.ty.analysis]
+strict-equality-semantics = true
+strict-generic-narrowing = true
+
+[tool.ty.environment]
+python-version = "3.10"
+python-platform = "all"
+
+[tool.ty.src]
+include = ["src", "tests"]
+
+[tool.ty.terminal]
+output-format = "concise"

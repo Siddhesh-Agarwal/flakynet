@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
-from .faults import Fault
-from .plan import Plan
-from .proxy import Proxy
+from ._proxy import Proxy
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from .faults import Fault
+    from .plan import Plan
 
 
 def proxy(

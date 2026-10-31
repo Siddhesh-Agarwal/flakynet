@@ -39,11 +39,11 @@ def test_every_matches_every_connection():
 
 def test_saw_requires_explicit_stream_side():
     with pytest.raises(TypeError):
-        cast(Any, saw)(b"x")
+        cast("Any", saw)(b"x")
     with pytest.raises(ValueError):
         saw(b"", side="client")
     with pytest.raises(ValueError):
-        saw(b"x", side=cast(Any, "both"))
+        saw(b"x", side=cast("Any", "both"))
 
 
 def test_plan_is_iterable_in_order():
@@ -62,24 +62,24 @@ def test_plan_repr_is_stable_and_address_free():
 
 def test_between_rejects_non_integer_bounds():
     with pytest.raises(TypeError):
-        between(cast(Any, 0.5), cast(Any, 2.5))
+        between(cast("Any", 0.5), cast("Any", 2.5))
     with pytest.raises(TypeError):
-        between(True, 2)
+        between(True, 2)  # noqa: FBT003 - bool is an int subclass and must be rejected
 
 
 def test_nth_rejects_non_integer_index():
     with pytest.raises(TypeError):
-        nth(cast(Any, 0.5))
+        nth(cast("Any", 0.5))
     with pytest.raises(TypeError):
-        nth(True)
+        nth(True)  # noqa: FBT003 - bool is an int subclass and must be rejected
 
 
 def test_connection_selectors_reject_invalid_connection_indexes():
     with pytest.raises(ValueError):
         every().matches(-1)
     with pytest.raises(TypeError):
-        every().matches(cast(Any, 0.5))
+        every().matches(cast("Any", 0.5))
     with pytest.raises(ValueError):
         nth(0).matches(-1)
     with pytest.raises(TypeError):
-        nth(0).matches(cast(Any, 0.5))
+        nth(0).matches(cast("Any", 0.5))

@@ -1,5 +1,6 @@
 """Seeded, reproducible network faults for testing real clients over real sockets."""
 
+from ._proxy import Proxy
 from .api import proxy
 from .events import CanonicalEvent, Event
 from .faults import (
@@ -13,7 +14,6 @@ from .faults import (
 )
 from .matcher import Matcher
 from .plan import ALL, Plan, between, every, nth, saw
-from .proxy import Proxy
 from .report import (
     ENDED_EARLY,
     FIRED,

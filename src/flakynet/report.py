@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import TYPE_CHECKING, TypeAlias
 
-from .events import Event
-from .faults import Fault
-from .plan import Plan, StreamSide
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from .events import Event
+    from .faults import Fault
+    from .plan import Plan, StreamSide
 
 FIRED = "FIRED"
 PREEMPTED = "PREEMPTED"
@@ -125,23 +127,23 @@ def build_report(
                     bytes_client_to_server=0,
                     bytes_server_to_client=0,
                     ended="not accepted",
-                )
+                ),
             )
             continue
 
-        for connection in matched:
-            statuses.append(
-                FaultStatus(
-                    fault_index=fault_index,
-                    fault=type(fault).__name__,
-                    fault_repr=repr(fault),
-                    conn_index=connection.conn_index,
-                    status=_status_for(fault, fault_index, connection, fired),
-                    bytes_client_to_server=connection.bytes_client_to_server,
-                    bytes_server_to_client=connection.bytes_server_to_client,
-                    ended=connection.end_reason,
-                )
+        statuses.extend(
+            FaultStatus(
+                fault_index=fault_index,
+                fault=type(fault).__name__,
+                fault_repr=repr(fault),
+                conn_index=connection.conn_index,
+                status=_status_for(fault, fault_index, connection, fired),
+                bytes_client_to_server=connection.bytes_client_to_server,
+                bytes_server_to_client=connection.bytes_server_to_client,
+                ended=connection.end_reason,
             )
+            for connection in matched
+        )
 
     return tuple(statuses)
 
@@ -176,6 +178,6 @@ def all_fired_failure(
         lines.extend(f"    {entry.describe()}" for entry in entries)
     lines.append(
         "Excused by default: PREEMPTED, ENDED_EARLY. "
-        "Pass allow={'MISSED', 'PENDING', 'UNMATCHED'} to opt out per status."
+        "Pass allow={'MISSED', 'PENDING', 'UNMATCHED'} to opt out per status.",
     )
     return "\n".join(lines)

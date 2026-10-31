@@ -31,26 +31,26 @@ def test_latency_rejects_negative_values():
 
 def test_latency_rejects_non_integer_values():
     with pytest.raises(TypeError):
-        Latency(ms=cast(Any, 0.5))
+        Latency(ms=cast("Any", 0.5))
     with pytest.raises(TypeError):
-        Latency(ms=cast(Any, float("nan")))
+        Latency(ms=cast("Any", float("nan")))
     with pytest.raises(TypeError):
-        Latency(ms=1, jitter_ms=cast(Any, 0.5))
+        Latency(ms=1, jitter_ms=cast("Any", 0.5))
 
 
 def test_numeric_fault_fields_require_integers():
     with pytest.raises(TypeError):
-        Bandwidth(bytes_per_second=cast(Any, 0.5))
+        Bandwidth(bytes_per_second=cast("Any", 0.5))
     with pytest.raises(TypeError):
-        Fragment(max_bytes=cast(Any, 3.0))
+        Fragment(max_bytes=cast("Any", 3.0))
     with pytest.raises(TypeError):
         Fragment(max_bytes=True)
     with pytest.raises(TypeError):
-        Fragment(max_bytes=3, window=cast(Any, (0.5, 5)))
+        Fragment(max_bytes=3, window=cast("Any", (0.5, 5)))
     with pytest.raises(TypeError):
-        Fragment(max_bytes=3, window=cast(Any, (0, 5.0)))
+        Fragment(max_bytes=3, window=cast("Any", (0, 5.0)))
     with pytest.raises(TypeError):
-        Reset(after_bytes=cast(Any, 0.5))
+        Reset(after_bytes=cast("Any", 0.5))
     with pytest.raises(ValueError):
         Reset(after_bytes=-1)
 
@@ -89,7 +89,14 @@ def test_discrete_fault_accepts_byte_or_saw_trigger():
 
 def test_invalid_side_is_rejected():
     with pytest.raises(ValueError):
-        Latency(ms=1, side=cast(Any, "both_ways"))
+        Latency(ms=1, side=cast("Any", "both_ways"))
+
+
+def test_invalid_conn_selector_is_rejected():
+    with pytest.raises(TypeError):
+        Latency(ms=1, conn=cast("Any", "every"))
+    with pytest.raises(TypeError):
+        RefuseConnect(conn=cast("Any", object()))
 
 
 def test_plan_normalizes_single_fault_and_iterable():
@@ -102,11 +109,11 @@ def test_plan_normalizes_single_fault_and_iterable():
 
 def test_plan_rejects_non_fault_inputs():
     with pytest.raises(TypeError):
-        Plan.of(cast(Any, "not a fault"))
+        Plan.of(cast("Any", "not a fault"))
     with pytest.raises(TypeError):
-        Plan.of(cast(Any, b"not a fault"))
+        Plan.of(cast("Any", b"not a fault"))
     with pytest.raises(TypeError):
-        Plan.of(cast(Any, [object()]))
+        Plan.of(cast("Any", [object()]))
 
 
 def test_plan_preserves_connection_scope():

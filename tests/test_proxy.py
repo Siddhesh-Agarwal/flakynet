@@ -7,8 +7,8 @@ import struct
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -17,6 +17,7 @@ from flakynet import (
     Blackhole,
     CanonicalEvent,
     CloseAfter,
+    Event,
     Fragment,
     Latency,
     Plan,
@@ -29,11 +30,14 @@ from flakynet import (
     saw,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Generator
+
 
 def _send_all(sock: socket.socket, payload: bytes, errors: list[BaseException]) -> None:
     try:
         sock.sendall(payload)
-    except BaseException as exc:
+    except BaseException as exc:  # noqa: BLE001 - record every sender failure
         errors.append(exc)
 
 
@@ -109,7 +113,9 @@ def read_prefix_and_end(sock: socket.socket, count: int) -> tuple[bytes, str]:
 
 
 @contextlib.contextmanager
-def recording_server() -> Iterator[tuple[tuple[str, int], list[bytes], threading.Event]]:
+def recording_server() -> Generator[
+    tuple[tuple[str, int], list[bytes], threading.Event], None, None
+]:
     listener = socket.create_server(("127.0.0.1", 0))
     received: list[bytes] = []
     done = threading.Event()
@@ -147,7 +153,7 @@ def recording_server() -> Iterator[tuple[tuple[str, int], list[bytes], threading
 @contextlib.contextmanager
 def half_close_server(
     banner: bytes,
-) -> Iterator[tuple[tuple[str, int], list[bytes], threading.Event]]:
+) -> Generator[tuple[tuple[str, int], list[bytes], threading.Event], None, None]:
     listener = socket.create_server(("127.0.0.1", 0))
     received: list[bytes] = []
     done = threading.Event()
@@ -182,7 +188,7 @@ def half_close_server(
 
 
 @contextlib.contextmanager
-def abrupt_then_echo_server() -> Iterator[tuple[str, int]]:
+def abrupt_then_echo_server() -> Generator[tuple[str, int], None, None]:
     listener = socket.create_server(("127.0.0.1", 0))
 
     def run() -> None:
@@ -218,7 +224,9 @@ def abrupt_then_echo_server() -> Iterator[tuple[str, int]]:
 
 
 @contextlib.contextmanager
-def collecting_server() -> Iterator[tuple[tuple[str, int], queue.Queue[bytes], threading.Event]]:
+def collecting_server() -> Generator[
+    tuple[tuple[str, int], queue.Queue[bytes], threading.Event], None, None
+]:
     listener = socket.create_server(("127.0.0.1", 0))
     chunks: queue.Queue[bytes] = queue.Queue()
     done = threading.Event()
@@ -252,7 +260,7 @@ def collecting_server() -> Iterator[tuple[tuple[str, int], queue.Queue[bytes], t
 
 
 @contextlib.contextmanager
-def sending_server(payload: bytes) -> Iterator[tuple[str, int]]:
+def sending_server(payload: bytes) -> Generator[tuple[str, int], None, None]:
     listener = socket.create_server(("127.0.0.1", 0))
 
     def run() -> None:
@@ -278,7 +286,7 @@ def sending_server(payload: bytes) -> Iterator[tuple[str, int]]:
 
 
 @contextlib.contextmanager
-def line_server() -> Iterator[tuple[tuple[str, int], list[bytes], threading.Event]]:
+def line_server() -> Generator[tuple[tuple[str, int], list[bytes], threading.Event], None, None]:
     listener = socket.create_server(("127.0.0.1", 0))
     received: list[bytes] = []
     done = threading.Event()
@@ -296,7 +304,7 @@ def line_server() -> Iterator[tuple[tuple[str, int], list[bytes], threading.Even
                     while b"\n" in buffer:
                         line, _, rest = buffer.partition(b"\n")
                         buffer[:] = rest
-                        received.append(line + b"\n")
+                        received.append(bytes(line) + b"\n")
                         if line == b"COMMIT":
                             conn.sendall(b"OK\n")
         except OSError:
@@ -395,7 +403,7 @@ def test_no_thread_left_after_exit(echo_server: tuple[str, int]) -> None:
     wait_until(
         lambda: (
             not any(thread.name.startswith("flakynet-proxy") for thread in threading.enumerate())
-        )
+        ),
     )
     assert proxy.active_connections == 0
     with pytest.raises(OSError):
@@ -465,7 +473,7 @@ def test_stop_with_active_connection(echo_server: tuple[str, int]) -> None:
     wait_until(
         lambda: (
             not any(thread.name.startswith("flakynet-proxy") for thread in threading.enumerate())
-        )
+        ),
     )
 
 
@@ -543,6 +551,7 @@ def test_reset_client_side_exact_prefix() -> None:
 def test_close_after_same_seed_same_prefix(echo_server: tuple[str, int]) -> None:
     plan = Plan(CloseAfter(after_bytes=between(100, 1000), side="server"))
     expected = resolve(plan, 1234, "p0", 0).faults[0].start
+    assert expected is not None
     observed: list[int] = []
 
     for _ in range(2):
@@ -565,6 +574,7 @@ def test_close_after_same_seed_same_prefix(echo_server: tuple[str, int]) -> None
 def test_reset_same_seed_same_prefix(echo_server: tuple[str, int]) -> None:
     plan = Plan(Reset(after_bytes=between(100, 1000), side="server"))
     expected = resolve(plan, 1234, "p0", 0).faults[0].start
+    assert expected is not None
     observed: list[int] = []
 
     for _ in range(2):
@@ -692,7 +702,7 @@ def test_bandwidth_same_seed_same_canonical_events(echo_server: tuple[str, int])
             bytes_per_second=between(1000, 2000),
             side="server",
             window=(0, len(payload)),
-        )
+        ),
     )
     first = run_and_capture(echo_server, plan, payload)
     second = run_and_capture(echo_server, plan, payload)
@@ -879,7 +889,7 @@ def run_armed_same_stream(
         CloseAfter(
             after=saw(b"COMMIT", side="server", delta=2),
             side="server",
-        )
+        ),
     )
     with (
         Proxy(target, plan, seed=0, name="p0") as proxy,
@@ -913,7 +923,7 @@ def run_armed_same_stream_determinism(
         CloseAfter(
             after=saw(b"X", side="server", delta=between(0, 4)),
             side="server",
-        )
+        ),
     )
     with (
         Proxy(target, plan, seed=1234, name="p0") as proxy,
@@ -939,7 +949,7 @@ def test_armed_same_stream_is_deterministic_across_runs(
 
 def run_armed_cross_stream(
     target: tuple[str, int],
-) -> tuple[bytes, tuple[CanonicalEvent, ...], tuple[CanonicalEvent, ...]]:
+) -> tuple[bytes, tuple[Event, ...], tuple[CanonicalEvent, ...]]:
     plan = Plan(CloseAfter(after=saw(b"X", side="client"), side="server"))
     with (
         Proxy(target, plan, seed=0, name="p0") as proxy,

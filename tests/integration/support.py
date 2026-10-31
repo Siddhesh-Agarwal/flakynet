@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import contextlib
 import time
-from collections.abc import Callable, Iterator
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 from flakynet import Plan, Proxy
 from flakynet import proxy as make_proxy
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Generator
 
 SEED = 7
 
@@ -40,6 +43,6 @@ def running_proxy(
     *,
     seed: int | str = SEED,
     name: str = "p0",
-) -> Iterator[Proxy]:
+) -> Generator[Proxy, None, None]:
     with make_proxy(target, plan, seed=seed, name=name) as proxy:
         yield proxy

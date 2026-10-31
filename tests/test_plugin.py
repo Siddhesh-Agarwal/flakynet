@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
 
-import pytest
+if TYPE_CHECKING:
+    import pytest
 
 ECHO_CONFTEST = """
 import socketserver
@@ -67,7 +69,7 @@ def test_plugin_replay_reproduces_canonical_events(pytester: pytest.Pytester) ->
                         break
             print("EVENTS", p.canonical_events())
             assert False
-        """
+        """,
     )
 
     first = pytester.runpytest("--flakynet-seed=7")
@@ -91,7 +93,7 @@ def test_plugin_sweep_reports_first_failing_seed(pytester: pytest.Pytester) -> N
         def test_sweep(flakynet):
             p = flakynet.proxy(("127.0.0.1", 1))
             assert p.seed != 2, f"failed at {p.seed}"
-        """
+        """,
     )
 
     result = pytester.runpytest("--flakynet-sweep=5")
@@ -109,7 +111,7 @@ def test_plugin_reports_pinned_seed(pytester: pytest.Pytester) -> None:
             p = flakynet.proxy(("127.0.0.1", 1), seed=7)
             assert p.seed == 7
             assert False
-        """
+        """,
     )
 
     result = pytester.runpytest("--flakynet-seed=99")
@@ -133,7 +135,7 @@ def test_plugin_names_proxies_in_creation_order(pytester: pytest.Pytester) -> No
             left = fn.resolve(plan, 5, first.name, 0).faults[0].start
             right = fn.resolve(plan, 5, second.name, 0).faults[0].start
             assert left != right
-        """
+        """,
     )
 
     result = pytester.runpytest()
@@ -146,7 +148,7 @@ def test_plugin_seed_precedence_default_and_cli(pytester: pytest.Pytester) -> No
         def test_seed(flakynet):
             p = flakynet.proxy(("127.0.0.1", 1))
             print("SEED", p.seed)
-        """
+        """,
     )
 
     default = pytester.runpytest("-s")

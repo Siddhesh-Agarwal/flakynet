@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import cast
 
 import pytest
 from support import fired, running_proxy, wait_until
@@ -19,7 +20,7 @@ async def fetch(url: str) -> bytes:
         session.get(url) as response,
     ):
         response.raise_for_status()
-        return await response.read()
+        return cast("bytes", await response.read())
 
 
 def proxy_url(proxy, path: str) -> str:

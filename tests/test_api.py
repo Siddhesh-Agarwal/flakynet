@@ -3,11 +3,14 @@ from __future__ import annotations
 import contextlib
 import socket
 import time
-from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import pytest
 
 from flakynet import CloseAfter, Plan, Reset, proxy
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def wait_until(predicate: Callable[[], bool], timeout: float = 5.0) -> None:

@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import socket
 import time
-from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING
 
 from flakynet import Latency, Plan, Proxy
-from flakynet.events import CanonicalEvent
 from flakynet.resolve import LatencyParams
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
+    from flakynet.events import CanonicalEvent
 
 
 def wait_until(predicate: Callable[[], bool], timeout: float = 5.0) -> None:
@@ -46,7 +50,7 @@ def per_connection(events: Iterable[CanonicalEvent]) -> set[tuple[object, ...]]:
                 event.fault,
                 event.kind,
                 event.params,
-            )
+            ),
         )
     return {tuple(group) for group in groups.values()}
 
@@ -84,7 +88,7 @@ def test_event_fields_and_canonical_stripping(echo_server: tuple[str, int]) -> N
 
 def run_sequential(
     target: tuple[str, int],
-) -> tuple[bytes, tuple[object, ...]]:
+) -> tuple[bytes, tuple[CanonicalEvent, ...]]:
     plan = Plan(Latency(ms=0, side="server", window=(0, 10)))
     with Proxy(target, plan, seed=7, name="p0") as proxy:
         with socket.create_connection((proxy.host, proxy.port), timeout=5.0) as sock:

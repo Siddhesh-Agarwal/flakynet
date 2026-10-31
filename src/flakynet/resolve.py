@@ -185,7 +185,8 @@ def resolve(
 
         for side in _sides(fault.side):
             if isinstance(fault, Latency):
-                assert jitter_key is not None
+                if jitter_key is None:
+                    raise RuntimeError("latency jitter key was not drawn")
                 start, end = _resolve_window(fault.window, rng)
                 params: ResolvedParams = LatencyParams(
                     jitter_key=jitter_key,
@@ -208,10 +209,11 @@ def resolve(
                             stream=side,
                             trigger=fault.after,
                             delta=delta,
-                        )
+                        ),
                     )
                     continue
-                assert fault.after_bytes is not None
+                if fault.after_bytes is None:
+                    raise RuntimeError("discrete fault has no trigger")
                 start = _draw_offset(fault.after_bytes, rng)
                 end = start
                 params = None

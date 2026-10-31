@@ -1,17 +1,19 @@
-# pyright: reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false
 from __future__ import annotations
 
 import shlex
-from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from .api import proxy as make_proxy
-from .faults import Fault
-from .plan import Plan
-from .proxy import Proxy
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from ._proxy import Proxy
+    from .faults import Fault
+    from .plan import Plan
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,7 +72,7 @@ class FlakynetFactory:
                 seed=effective,
                 pinned=pinned,
                 source=source,
-            )
+            ),
         )
         return created
 
@@ -94,11 +96,11 @@ class FlakynetFactory:
             provenance = "pinned by test" if record.pinned else f"not pinned, from {record.source}"
             lines.append(
                 f"  {record.proxy.name}: seed={record.seed} ({provenance}), "
-                f"plan={record.proxy.plan!r}"
+                f"plan={record.proxy.plan!r}",
             )
             lines.append(
                 f"    replay: pytest {shlex.quote(base)} "
-                f"--flakynet-seed={shlex.quote(str(record.seed))}"
+                f"--flakynet-seed={shlex.quote(str(record.seed))}",
             )
         return "\n".join(lines)
 
@@ -182,7 +184,7 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(
     item: pytest.Item,
-    call: pytest.CallInfo[None],
+    call: pytest.CallInfo[None],  # noqa: ARG001 - required by the hook signature
 ) -> Any:
     outcome = yield
     report = outcome.get_result()
@@ -202,7 +204,7 @@ def pytest_runtest_makereport(
 
 def pytest_terminal_summary(
     terminalreporter: Any,
-    exitstatus: int,
+    exitstatus: int,  # noqa: ARG001 - required by the hook signature
     config: pytest.Config,
 ) -> None:
     failures = config.stash.get(SWEEP_FAILURES_KEY, {})

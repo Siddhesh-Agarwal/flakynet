@@ -20,15 +20,18 @@ def _validate_side(side: Side) -> None:
         raise ValueError("side must be 'client', 'server', or 'both'")
 
 
+_WINDOW_ARITY = 2
+
+
 def _validate_conn(conn: ConnSelector) -> None:
     if not isinstance(conn, (Nth, Every)):
-        raise ValueError("conn must be nth(...) or every()")
+        raise TypeError("conn must be nth(...) or every()")
 
 
 def _validate_window(window: Window) -> None:
     if window is None:
         return
-    if not isinstance(window, tuple) or len(window) != 2:
+    if not isinstance(window, tuple) or len(window) != _WINDOW_ARITY:
         raise ValueError("window must be a (start, end) tuple or None")
 
     start, end = window

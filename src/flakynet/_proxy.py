@@ -7,9 +7,7 @@ import socket
 import struct
 import threading
 import time
-from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from types import TracebackType
 from typing import TYPE_CHECKING, Literal
 
 from .events import CanonicalEvent, Event, EventKind
@@ -43,15 +41,19 @@ from .resolve import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Sequence
+    from types import TracebackType
+
     from .faults import Fault
 
 logger = logging.getLogger(__name__)
 
 _Direction = Literal["client_to_server", "server_to_client"]
 _TerminalAction = Literal["close", "reset"]
+_MAX_PORT = 65535
 
 
-class _TerminalFault(Exception):
+class _TerminalFaultError(Exception):
     """Internal signal that a pump applied a terminal fault."""
 
 
@@ -160,9 +162,9 @@ def _next_boundary(
             candidates.append(fault.start)
         elif fault.end is not None and offset < fault.end:
             candidates.append(fault.end)
-    for fault in discrete:
-        if fault.fault_index not in fired and offset < fault.start:
-            candidates.append(fault.start)
+    candidates.extend(
+        fault.start for fault in discrete if fault.fault_index not in fired and offset < fault.start
+    )
     return min(candidates, default=None)
 
 
@@ -267,8 +269,8 @@ class Proxy:
         target_host, target_port = target
         if not isinstance(target_host, str) or not target_host:
             raise ValueError("target host must be a non-empty string")
-        if not isinstance(target_port, int) or not (1 <= target_port <= 65535):
-            raise ValueError("target port must be between 1 and 65535")
+        if not isinstance(target_port, int) or not (1 <= target_port <= _MAX_PORT):
+            raise ValueError(f"target port must be between 1 and {_MAX_PORT}")
         if not isinstance(host, str) or not host:
             raise ValueError("host must be a non-empty string")
         if name is not None and (not isinstance(name, str) or not name):
@@ -446,7 +448,7 @@ class Proxy:
                     params=params,
                     seq=self._event_seq,
                     timestamp=time.monotonic(),
-                )
+                ),
             )
             self._event_seq += 1
 
@@ -524,7 +526,7 @@ class Proxy:
         self._loop = loop
         try:
             loop.run_until_complete(self._serve(loop))
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - report every thread failure
             self._startup_error = exc
             self._ready.set()
         finally:
@@ -541,7 +543,7 @@ class Proxy:
             family=socket.AF_INET,
             backlog=128,
         )
-        listener.setblocking(False)
+        listener.setblocking(False)  # noqa: FBT003 - flag is positional-only
         self._listener = listener
         host, port = listener.getsockname()[:2]
         self._host = str(host)
@@ -573,7 +575,7 @@ class Proxy:
             except OSError:
                 break
 
-            client.setblocking(False)
+            client.setblocking(False)  # noqa: FBT003 - flag is positional-only
             index = self._next_index
             self._next_index += 1
             try:
@@ -583,7 +585,7 @@ class Proxy:
                     self._name,
                     index,
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 - a bad plan must not kill the accept loop
                 _close_socket(client)
                 continue
 
@@ -618,7 +620,7 @@ class Proxy:
                 self._active_connections += 1
 
             task = loop.create_task(
-                self._handle_client(loop, client, index, connection_plan, state)
+                self._handle_client(loop, client, index, connection_plan, state),
             )
             self._connection_tasks.add(task)
             task.add_done_callback(self._on_connection_done)
@@ -644,7 +646,7 @@ class Proxy:
         state: _ConnectionState,
     ) -> None:
         upstream = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        upstream.setblocking(False)
+        upstream.setblocking(False)  # noqa: FBT003 - flag is positional-only
         try:
             try:
                 await loop.sock_connect(upstream, self._target)
@@ -663,7 +665,7 @@ class Proxy:
                     state,
                     connection_plan,
                 )
-            except _TerminalFault:
+            except _TerminalFaultError:
                 pass
             except asyncio.CancelledError:
                 raise
@@ -713,7 +715,7 @@ class Proxy:
                 connection_plan.conn_index,
                 connection_plan.faults,
                 armed_events,
-            )
+            ),
         )
         server_to_client = loop.create_task(
             self._pump(
@@ -725,7 +727,7 @@ class Proxy:
                 connection_plan.conn_index,
                 connection_plan.faults,
                 armed_events,
-            )
+            ),
         )
         tasks = (client_to_server, server_to_client)
         try:
@@ -779,7 +781,7 @@ class Proxy:
                     _reset_sockets(source, destination)
                 else:
                     _graceful_close_sockets(source, destination)
-                raise _TerminalFault
+                raise _TerminalFaultError
             with self._lock:
                 state.set_end(stream, "graceful")
         except asyncio.CancelledError:
@@ -787,7 +789,7 @@ class Proxy:
                 state.set_end(stream, "cancelled")
             raise
         finally:
-            if not terminal:
+            if not terminal:  # ty: ignore[redundant-condition-strict] - terminal path raises
                 with contextlib.suppress(OSError):
                     destination.shutdown(socket.SHUT_WR)
 

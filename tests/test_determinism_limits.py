@@ -12,12 +12,17 @@ import random
 import socket
 import threading
 import time
-from collections.abc import Callable, Iterator
+from typing import TYPE_CHECKING
 
 import pytest
 
 from flakynet import CloseAfter, Latency, Plan, Proxy, Reset, saw
 from flakynet.report import ConnectionSnapshot, build_report
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Generator
+
+    from flakynet.events import CanonicalEvent
 
 
 def wait_until(predicate: Callable[[], bool], timeout: float = 5.0) -> None:
@@ -39,7 +44,7 @@ def wait_for_event(
         lambda: any(
             event.kind == kind and (stream is None or event.stream == stream)
             for event in proxy.canonical_events()
-        )
+        ),
     )
 
 
@@ -49,7 +54,7 @@ def scripted_server(
     banner: bytes = b"",
     wait_for_client_byte: bool = False,
     close_after_banner: bool = False,
-) -> Iterator[tuple[tuple[str, int], threading.Event, threading.Event]]:
+) -> Generator[tuple[tuple[str, int], threading.Event, threading.Event], None, None]:
     """A server whose banner is released on demand.
 
     Yields the address, an event that releases the banner, and an event that
@@ -97,7 +102,7 @@ def run_round_trip(
     payload: bytes,
     *,
     chunks: list[bytes] | None = None,
-) -> tuple[object, ...]:
+) -> tuple[CanonicalEvent, ...]:
     with Proxy(target, plan, seed=0, name="p0") as proxy:
         with socket.create_connection((proxy.host, proxy.port), timeout=5.0) as sock:
             sock.settimeout(2.0)
@@ -259,7 +264,7 @@ def test_cross_stream_armed_fault_can_miss_if_target_closes_first() -> None:
 def run_ordered(
     target: tuple[str, int],
     payloads: list[bytes],
-) -> tuple[object, ...]:
+) -> tuple[CanonicalEvent, ...]:
     plan = Plan(CloseAfter(after_bytes=10, side="server"))
     with Proxy(target, plan, seed=0, name="p0") as proxy:
         for payload in payloads:
@@ -314,7 +319,7 @@ def test_actual_sleep_duration_does_not_change_events(
     payload = b"abcd"
     normal = run_round_trip(echo_server, plan, payload)
 
-    async def fake_sleep(*args: object, **kwargs: object) -> None:
+    async def fake_sleep(*_args: object, **_kwargs: object) -> None:
         return None
 
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
@@ -348,8 +353,24 @@ def test_static_window_events_are_chunk_invariant(
 def test_report_order_does_not_depend_on_input_order() -> None:
     """The report sorts snapshots; dict insertion order cannot leak through."""
     plan = Plan(CloseAfter(after_bytes=1, side="server"))
-    later = ConnectionSnapshot(1, 0, 0, "graceful", "graceful", "graceful", False)
-    earlier = ConnectionSnapshot(0, 0, 0, "graceful", "graceful", "graceful", False)
+    later = ConnectionSnapshot(
+        conn_index=1,
+        bytes_client_to_server=0,
+        bytes_server_to_client=0,
+        client_end="graceful",
+        server_end="graceful",
+        end_reason="graceful",
+        terminal_fired=False,
+    )
+    earlier = ConnectionSnapshot(
+        conn_index=0,
+        bytes_client_to_server=0,
+        bytes_server_to_client=0,
+        client_end="graceful",
+        server_end="graceful",
+        end_reason="graceful",
+        terminal_fired=False,
+    )
 
     report = build_report(plan, [], [later, earlier])
 

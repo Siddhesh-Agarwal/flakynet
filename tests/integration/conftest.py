@@ -3,11 +3,14 @@ from __future__ import annotations
 import contextlib
 import os
 import threading
-from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 REDIS_URL = os.environ.get(
     "FLAKYNET_REDIS_URL",
@@ -30,7 +33,7 @@ def redis_url() -> str:
     )
     try:
         client.ping()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - any connection failure means skip
         pytest.skip(f"Redis is not available at {REDIS_URL}: {exc}")
     finally:
         client.close()
@@ -44,7 +47,7 @@ def postgres_dsn() -> str:
     try:
         with psycopg.connect(POSTGRES_DSN, connect_timeout=2) as conn:
             conn.execute("SELECT 1")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - any connection failure means skip
         pytest.skip(f"PostgreSQL is not available at {POSTGRES_DSN}: {exc}")
     return POSTGRES_DSN
 
@@ -54,7 +57,7 @@ class _Server(ThreadingHTTPServer):
     daemon_threads = True
 
     def handle_error(self, request: object, client_address: object) -> None:
-        return
+        del request, client_address
 
 
 class _BytesHandler(BaseHTTPRequestHandler):
@@ -79,8 +82,8 @@ class _BytesHandler(BaseHTTPRequestHandler):
         with contextlib.suppress(BrokenPipeError, ConnectionResetError):
             self.wfile.write(body)
 
-    def log_message(self, *args: object) -> None:
-        return
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+        del format, args
 
 
 @pytest.fixture(scope="session")

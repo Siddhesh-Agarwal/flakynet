@@ -6,7 +6,7 @@ import struct
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -25,6 +25,9 @@ from flakynet import (
     nth,
     saw,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Generator
 
 
 def wait_until(predicate: Callable[[], bool], timeout: float = 5.0) -> None:
@@ -66,7 +69,7 @@ def statuses_for(report, fault_index: int) -> list[str]:
 
 
 @contextlib.contextmanager
-def reset_server() -> Iterator[tuple[str, int]]:
+def reset_server() -> Generator[tuple[str, int], None, None]:
     listener = socket.create_server(("127.0.0.1", 0))
 
     def run() -> None:
@@ -106,7 +109,7 @@ def test_fired_status(echo_server: tuple[str, int]) -> None:
         report = proxy.fault_report()
 
     assert [(entry.fault_index, entry.conn_index, entry.status) for entry in report] == [
-        (0, 0, FIRED)
+        (0, 0, FIRED),
     ]
     assert report[0].ended == "flakynet"
     assert report[0].bytes_server_to_client == 10
