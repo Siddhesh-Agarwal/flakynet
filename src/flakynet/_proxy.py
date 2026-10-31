@@ -51,10 +51,28 @@ logger = logging.getLogger(__name__)
 _Direction = Literal["client_to_server", "server_to_client"]
 _TerminalAction = Literal["close", "reset"]
 _MAX_PORT = 65535
+_CLOCK_RESOLUTION = time.get_clock_info("monotonic").resolution
 
 
 class _TerminalFaultError(Exception):
     """Internal signal that a pump applied a terminal fault."""
+
+
+async def _sleep_at_least(loop: asyncio.AbstractEventLoop, delay: float) -> None:
+    """Sleep for at least ``delay`` seconds on the loop's clock.
+
+    ``asyncio`` treats every timer within one clock-resolution tick of now as
+    due, and I/O completions can wake the loop before a short timer expires.
+    Windows' ``monotonic()`` ticks every 15.625 ms as a result, so a 5 ms sleep
+    can return immediately. Padding each wait by one tick and re-checking the
+    deadline preserves at-least semantics; the actual sleep may overshoot.
+    """
+    deadline = loop.time() + delay
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return
+        await asyncio.sleep(remaining + _CLOCK_RESOLUTION)
 
 
 def _close_socket(sock: socket.socket) -> None:
@@ -916,7 +934,7 @@ class Proxy:
             if rate is not None:
                 delay_seconds += count / rate
             if delay_seconds > 0:
-                await asyncio.sleep(delay_seconds)
+                await _sleep_at_least(loop, delay_seconds)
 
             piece_start = offset
             try:

@@ -209,7 +209,9 @@ def test_upstream_connect_error_is_recorded() -> None:
     plan = Plan(CloseAfter(after_bytes=1, side="server"))
     with Proxy((str(target[0]), int(target[1])), plan, seed=0, name="p0") as proxy:
         with socket.create_connection((proxy.host, proxy.port), timeout=5.0) as sock:
-            sock.settimeout(2.0)
+            # Windows retries the SYN after an RST, so a refused local connect
+            # can take a couple of seconds to reach the proxy.
+            sock.settimeout(30.0 if sys.platform == "win32" else 2.0)
             assert sock.recv(1) == b""
         wait_until(lambda: proxy.active_connections == 0)
         report = proxy.fault_report()

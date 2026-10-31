@@ -340,6 +340,7 @@ def run_and_capture(
     payload: bytes,
     *,
     seed: int | str = 1234,
+    window_exits: int = 1,
 ) -> tuple[bytes, tuple[CanonicalEvent, ...]]:
     with (
         Proxy(target, plan, seed=seed, name="p0") as proxy,
@@ -347,7 +348,14 @@ def run_and_capture(
     ):
         sock.sendall(payload)
         received = read_exact(sock, len(payload))
-        wait_until(lambda: len(proxy.canonical_events()) >= 2)
+        # The client can finish reading before the pump resumes from its last
+        # send and records the window exits, especially on Windows.
+        wait_until(
+            lambda: (
+                sum(event.kind == "window_exited" for event in proxy.canonical_events())
+                >= window_exits
+            ),
+        )
         events = proxy.canonical_events()
     return received, events
 
@@ -484,7 +492,9 @@ def test_upstream_connect_failure_closes_client() -> None:
 
     with Proxy((str(target[0]), int(target[1]))) as proxy:
         with socket.create_connection((proxy.host, proxy.port), timeout=5.0) as sock:
-            sock.settimeout(2.0)
+            # Windows retries the SYN after an RST, so a refused local connect
+            # can take a couple of seconds to reach the proxy.
+            sock.settimeout(30.0 if sys.platform == "win32" else 2.0)
             assert sock.recv(1) == b""
         wait_until(lambda: proxy.active_connections == 0)
 
@@ -748,7 +758,7 @@ def test_latency_logs_only_window_events_even_when_fragmented(
         Fragment(max_bytes=1, side="server", window=(0, len(payload))),
         Latency(ms=0, side="server", window=(0, len(payload))),
     )
-    received, events = run_and_capture(echo_server, plan, payload)
+    received, events = run_and_capture(echo_server, plan, payload, window_exits=2)
     assert received == payload
     assert {event.kind for event in events} == {"window_entered", "window_exited"}
     latency_events = [event for event in events if event.fault_index == 1]
